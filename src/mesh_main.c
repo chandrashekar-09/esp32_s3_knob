@@ -37,5 +37,5 @@ void app_main(void)
     cfg.rx_task_prio = 5;
 
     ESP_ERROR_CHECK(mesh_manager_start(&cfg));
-    ESP_LOGI(APP_TAG, "mesh manager started");
+    ESP_LOGI(APP_TAG, "mesh manager started !");
 }
