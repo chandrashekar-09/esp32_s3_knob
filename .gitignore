@@ -3,5 +3,5 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
-
+!.pio/build/esp32dev/
 !.pio/build/esp32dev/firmware.bin
