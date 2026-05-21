@@ -4,8 +4,17 @@
 .vscode/launch.json
 .vscode/ipch/
 
-# 1. Ignore the entire .pio directory structure
-.pio/
+# 1. Allow Git into the .pio directory, but ignore everything directly inside it
+!.pio/
+.pio/*
 
-# 2. Force Git to look for files named 'firmware.bin' anywhere inside .pio
-!.pio/**/firmware.bin
+# 2. Allow Git into the build directory, but ignore everything directly inside it
+!.pio/build/
+.pio/build/*
+
+# 3. Allow Git into the esp32dev directory, but ignore everything directly inside it
+!.pio/build/esp32dev/
+.pio/build/esp32dev/*
+
+# 4. Explicitly allow ONLY the firmware.bin file
+!.pio/build/esp32dev/firmware.bin
