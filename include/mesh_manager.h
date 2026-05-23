@@ -45,6 +45,8 @@ esp_err_t mesh_manager_stop(void);
 
 bool mesh_manager_is_root(void);
 int mesh_manager_get_layer(void);
+bool mesh_manager_is_connected(void);
+bool mesh_manager_is_router_connected(void);
 
 esp_err_t mesh_manager_send(const mesh_addr_t *to,
                             const uint8_t *data,
@@ -52,6 +54,8 @@ esp_err_t mesh_manager_send(const mesh_addr_t *to,
                             bool p2p);
 
 esp_err_t mesh_manager_send_broadcast(const uint8_t *data, size_t len);
+
+esp_err_t mesh_manager_get_root_addr(mesh_addr_t *root);
 
 #ifdef __cplusplus
 }

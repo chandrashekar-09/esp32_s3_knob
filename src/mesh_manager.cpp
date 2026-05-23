@@ -20,7 +20,9 @@ static const char *kTag = "mesh_manager";
 static mesh_manager_config_t s_cfg = {};
 static bool s_running = false;
 static bool s_mesh_connected = false;
+static bool s_router_connected = false;
 static mesh_addr_t s_parent_addr = {};
+static mesh_addr_t s_root_addr = {};
 static int s_mesh_layer = -1;
 static esp_netif_t *s_netif_sta = NULL;
 static TaskHandle_t s_tx_task = NULL;
@@ -366,6 +368,7 @@ static void mesh_event_handler(void *arg, esp_event_base_t event_base,
     break;
     case MESH_EVENT_ROOT_ADDRESS: {
         mesh_event_root_address_t *root_addr = (mesh_event_root_address_t *)event_data;
+        memcpy(&s_root_addr, root_addr, sizeof(mesh_addr_t));
         ESP_LOGI(kTag, "<MESH_EVENT_ROOT_ADDRESS>root address:" MACSTR "", MAC2STR(root_addr->addr));
     }
     break;
@@ -471,8 +474,25 @@ static void mesh_event_handler(void *arg, esp_event_base_t event_base,
 static void ip_event_handler(void *arg, esp_event_base_t event_base,
                              int32_t event_id, void *event_data)
 {
-    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-    ESP_LOGI(kTag, "<IP_EVENT_STA_GOT_IP>IP:" IPSTR, IP2STR(&event->ip_info.ip));
+    if (event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(kTag, "<IP_EVENT_STA_GOT_IP>IP:" IPSTR, IP2STR(&event->ip_info.ip));
+        s_router_connected = true;
+        return;
+    }
+
+    if (event_id == IP_EVENT_STA_LOST_IP) {
+        ESP_LOGW(kTag, "<IP_EVENT_STA_LOST_IP>");
+        s_router_connected = false;
+    }
+}
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_router_connected = false;
+    }
 }
 
 static esp_err_t init_nvs()
@@ -528,6 +548,8 @@ esp_err_t mesh_manager_start(const mesh_manager_config_t *config)
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, &ip_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -558,7 +580,8 @@ esp_err_t mesh_manager_start(const mesh_manager_config_t *config)
         ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(10));
     }
 
-    mesh_cfg_t cfg = MESH_INIT_CONFIG_DEFAULT();
+    mesh_cfg_t cfg = {};
+    cfg.crypto_funcs = &g_wifi_default_mesh_crypto_funcs;
     memcpy((uint8_t *)&cfg.mesh_id, s_cfg.mesh_id, 6);
 
     cfg.channel = (s_cfg.channel == 0 && router_channel > 0) ? router_channel : s_cfg.channel;
@@ -582,6 +605,20 @@ esp_err_t mesh_manager_start(const mesh_manager_config_t *config)
     return ESP_OK;
 }
 
+esp_err_t mesh_manager_get_root_addr(mesh_addr_t *root)
+{
+    if (!root) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (memcmp(s_root_addr.addr, "\0\0\0\0\0\0", sizeof(s_root_addr.addr)) == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    *root = s_root_addr;
+    return ESP_OK;
+}
+
 esp_err_t mesh_manager_stop(void)
 {
     s_running = false;
@@ -592,6 +629,16 @@ esp_err_t mesh_manager_stop(void)
 bool mesh_manager_is_root(void)
 {
     return esp_mesh_is_root();
+}
+
+bool mesh_manager_is_connected(void)
+{
+    return s_mesh_connected;
+}
+
+bool mesh_manager_is_router_connected(void)
+{
+    return s_router_connected;
 }
 
 int mesh_manager_get_layer(void)
