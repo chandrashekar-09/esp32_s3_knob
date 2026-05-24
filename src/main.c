@@ -38,11 +38,11 @@ static const char *kTag = "knob_main";
 #define TOUCH_PIN_INT 7
 #define TOUCH_PIN_RST 8
 
-// #define MESH_ROUTER_SSID   "TEAMPLAYER 9060"
-// #define MESH_ROUTER_PASS   "7mA82;58"
+#define MESH_ROUTER_SSID   "TEAMPLAYER 9060"
+#define MESH_ROUTER_PASS   "7mA82;58"
 
-#define MESH_ROUTER_SSID   "IIIT-Guest"
-#define MESH_ROUTER_PASS   "f6s68VHJ89mC"
+// #define MESH_ROUTER_SSID   "IIIT-Guest"
+// #define MESH_ROUTER_PASS   "f6s68VHJ89mC"
 
 #define MESH_AP_PASS       "mesh_ap_pass"
 
