@@ -19,6 +19,7 @@ typedef struct {
     int pin_sio2;
     int pin_sio3;
     int pin_rst;
+    int pin_te;
     int pin_bl;
     int width;
     int height;

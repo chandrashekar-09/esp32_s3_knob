@@ -13,6 +13,7 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mbedtls/sha256.h"
 
@@ -83,6 +84,7 @@ static const char *kTag = "mesh_ota";
 static mesh_ota_config_t s_cfg = {};
 static mesh_ota_state_t s_state = {};
 static TaskHandle_t s_task = NULL;
+static SemaphoreHandle_t s_state_lock = NULL;
 static bool s_initialized = false;
 static bool s_mesh_ready = false;
 static bool s_net_ready = false;
@@ -94,6 +96,29 @@ static size_t mesh_ota_chunk_size(void)
         return s_cfg.chunk_size;
     }
     return MESH_OTA_DEFAULT_CHUNK;
+}
+
+static void mesh_ota_lock(void)
+{
+    if (s_state_lock) {
+        xSemaphoreTake(s_state_lock, pdMS_TO_TICKS(200));
+    }
+}
+
+static void mesh_ota_unlock(void)
+{
+    if (s_state_lock) {
+        xSemaphoreGive(s_state_lock);
+    }
+}
+
+static bool mesh_ota_is_in_progress(void)
+{
+    bool in_progress = false;
+    mesh_ota_lock();
+    in_progress = s_state.in_progress;
+    mesh_ota_unlock();
+    return in_progress;
 }
 
 static void mesh_ota_sha256_hex(const uint8_t *hash, char *out, size_t out_len)
@@ -212,6 +237,21 @@ static esp_err_t mesh_ota_fetch_version(int *out_version)
     return ESP_OK;
 }
 
+static int mesh_ota_read_with_retry(esp_http_client_handle_t client, uint8_t *buf, int len)
+{
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        int read = esp_http_client_read(client, (char *)buf, len);
+        if (read > 0) {
+            return read;
+        }
+        if (read == 0 && esp_http_client_is_complete_data_received(client)) {
+            return 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return -1;
+}
+
 static esp_err_t mesh_ota_stream_and_broadcast(int new_version)
 {
     esp_http_client_config_t config = {
@@ -310,7 +350,7 @@ static esp_err_t mesh_ota_stream_and_broadcast(int new_version)
             to_read = (int)((uint32_t)content_length - offset);
         }
 
-        int read = esp_http_client_read(client, (char *)chunk_data, to_read);
+        int read = mesh_ota_read_with_retry(client, chunk_data, to_read);
         if (read <= 0) {
             ESP_LOGE(kTag, "OTA: read failed at offset %" PRIu32, offset);
             break;
@@ -360,6 +400,7 @@ static esp_err_t mesh_ota_stream_and_broadcast(int new_version)
         }
     } else {
         esp_ota_abort(ota_handle);
+        ui_engine_set_ota_status("OTA TX FAIL");
     }
 
     mesh_ota_end_payload_t end = {};
@@ -388,21 +429,24 @@ static void mesh_ota_handle_begin(const mesh_addr_t *from, const uint8_t *payloa
     }
 
     const mesh_ota_begin_payload_t *begin = (const mesh_ota_begin_payload_t *)payload;
-    if (begin->fw_version <= s_cfg.current_version) {
+    if (begin->fw_version <= s_cfg.current_version || begin->total_size == 0 || begin->chunk_size == 0) {
         return;
     }
-
+    mesh_ota_lock();
     if (s_state.in_progress) {
+        mesh_ota_unlock();
         return;
     }
 
     s_state.partition = esp_ota_get_next_update_partition(NULL);
     if (!s_state.partition) {
+        mesh_ota_unlock();
         return;
     }
 
     esp_err_t err = esp_ota_begin(s_state.partition, begin->total_size, &s_state.handle);
     if (err != ESP_OK) {
+        mesh_ota_unlock();
         return;
     }
 
@@ -411,6 +455,7 @@ static void mesh_ota_handle_begin(const mesh_addr_t *from, const uint8_t *payloa
     s_state.expected_size = begin->total_size;
     s_state.received = 0;
     s_state.crc32 = 0;
+    mesh_ota_unlock();
     ui_engine_set_ota_status("OTA RX 0%");
 
     (void)from;
@@ -418,7 +463,13 @@ static void mesh_ota_handle_begin(const mesh_addr_t *from, const uint8_t *payloa
 
 static void mesh_ota_handle_chunk(const mesh_addr_t *from, const uint8_t *payload, size_t len)
 {
-    if (!s_state.in_progress || len < sizeof(mesh_ota_chunk_payload_t)) {
+    if (len < sizeof(mesh_ota_chunk_payload_t)) {
+        return;
+    }
+
+    mesh_ota_lock();
+    if (!s_state.in_progress) {
+        mesh_ota_unlock();
         return;
     }
 
@@ -426,6 +477,16 @@ static void mesh_ota_handle_chunk(const mesh_addr_t *from, const uint8_t *payloa
     const uint8_t *data = payload + sizeof(mesh_ota_chunk_payload_t);
     size_t data_len = chunk->data_len;
     if (sizeof(mesh_ota_chunk_payload_t) + data_len > len) {
+        mesh_ota_unlock();
+        return;
+    }
+
+    if (chunk->offset != s_state.received) {
+        mesh_ota_send_ack(from, 0, 7, s_state.incoming_version);
+        esp_ota_abort(s_state.handle);
+        s_state.in_progress = false;
+        mesh_ota_unlock();
+        ui_engine_set_ota_status("OTA OFFSET FAIL");
         return;
     }
 
@@ -434,6 +495,7 @@ static void mesh_ota_handle_chunk(const mesh_addr_t *from, const uint8_t *payloa
         mesh_ota_send_ack(from, 0, 1, s_state.incoming_version);
         esp_ota_abort(s_state.handle);
         s_state.in_progress = false;
+        mesh_ota_unlock();
         return;
     }
 
@@ -447,11 +509,18 @@ static void mesh_ota_handle_chunk(const mesh_addr_t *from, const uint8_t *payloa
             ui_engine_set_ota_status(status);
         }
     }
+    mesh_ota_unlock();
 }
 
 static void mesh_ota_handle_end(const mesh_addr_t *from, const uint8_t *payload, size_t len)
 {
-    if (!s_state.in_progress || len < sizeof(mesh_ota_end_payload_t)) {
+    if (len < sizeof(mesh_ota_end_payload_t)) {
+        return;
+    }
+
+    mesh_ota_lock();
+    if (!s_state.in_progress) {
+        mesh_ota_unlock();
         return;
     }
 
@@ -460,6 +529,7 @@ static void mesh_ota_handle_end(const mesh_addr_t *from, const uint8_t *payload,
         mesh_ota_send_ack(from, 0, 6, s_state.incoming_version);
         esp_ota_abort(s_state.handle);
         s_state.in_progress = false;
+        mesh_ota_unlock();
         ui_engine_set_ota_status("OTA ABORT");
         return;
     }
@@ -468,6 +538,7 @@ static void mesh_ota_handle_end(const mesh_addr_t *from, const uint8_t *payload,
         mesh_ota_send_ack(from, 0, 2, s_state.incoming_version);
         esp_ota_abort(s_state.handle);
         s_state.in_progress = false;
+        mesh_ota_unlock();
         ui_engine_set_ota_status("OTA RX FAIL");
         return;
     }
@@ -476,6 +547,7 @@ static void mesh_ota_handle_end(const mesh_addr_t *from, const uint8_t *payload,
         mesh_ota_send_ack(from, 0, 3, s_state.incoming_version);
         esp_ota_abort(s_state.handle);
         s_state.in_progress = false;
+        mesh_ota_unlock();
         ui_engine_set_ota_status("OTA CRC FAIL");
         return;
     }
@@ -484,6 +556,7 @@ static void mesh_ota_handle_end(const mesh_addr_t *from, const uint8_t *payload,
     if (err != ESP_OK) {
         mesh_ota_send_ack(from, 0, 4, s_state.incoming_version);
         s_state.in_progress = false;
+        mesh_ota_unlock();
         ui_engine_set_ota_status("OTA END FAIL");
         return;
     }
@@ -492,11 +565,13 @@ static void mesh_ota_handle_end(const mesh_addr_t *from, const uint8_t *payload,
     if (err != ESP_OK) {
         mesh_ota_send_ack(from, 0, 5, s_state.incoming_version);
         s_state.in_progress = false;
+        mesh_ota_unlock();
         ui_engine_set_ota_status("OTA BOOT FAIL");
         return;
     }
 
     mesh_ota_send_ack(from, 1, 0, s_state.incoming_version);
+    mesh_ota_unlock();
     ui_engine_set_ota_status("OTA RESTART");
     vTaskDelay(500 / portTICK_PERIOD_MS);
     esp_restart();
@@ -552,7 +627,7 @@ static void mesh_ota_task(void *arg)
             continue;
         }
 
-        if (s_state.in_progress) {
+        if (mesh_ota_is_in_progress()) {
             vTaskDelay(pdMS_TO_TICKS(MESH_OTA_POLL_INTERVAL_MS));
             continue;
         }
@@ -589,6 +664,12 @@ esp_err_t mesh_ota_init(const mesh_ota_config_t *config)
     }
 
     s_cfg = *config;
+    if (!s_state_lock) {
+        s_state_lock = xSemaphoreCreateMutex();
+        if (!s_state_lock) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
     s_initialized = true;
     return ESP_OK;
 }

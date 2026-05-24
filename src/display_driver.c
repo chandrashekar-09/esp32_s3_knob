@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #define ST77916_CMD_SWRESET 0x01
 #define ST77916_CMD_SLPOUT  0x11
@@ -26,6 +27,23 @@ static spi_device_handle_t s_spi = NULL;
 static display_config_t s_cfg = {};
 static display_flush_done_cb_t s_flush_cb = NULL;
 static void *s_flush_ctx = NULL;
+
+// TE (Tearing Effect) synchronization
+static SemaphoreHandle_t s_te_sem = NULL;
+static volatile bool s_te_enabled = false;
+
+// ISR handler for TE signal
+static void IRAM_ATTR display_te_isr(void *arg)
+{
+    (void)arg;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (s_te_sem) {
+        xSemaphoreGiveFromISR(s_te_sem, &xHigherPriorityTaskWoken);
+    }
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }
+}
 
 static esp_err_t st77916_write_cmd(uint8_t cmd)
 {
@@ -185,6 +203,28 @@ esp_err_t display_driver_init(const display_config_t *config)
         return err;
     }
 
+    // Initialize TE (Tearing Effect) GPIO for synchronization
+    if (s_cfg.pin_te >= 0) {
+        gpio_config_t te_conf = {};
+        te_conf.pin_bit_mask = (1ULL << s_cfg.pin_te);
+        te_conf.mode = GPIO_MODE_INPUT;
+        te_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        te_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        te_conf.intr_type = GPIO_INTR_POSEDGE;
+        gpio_config(&te_conf);
+
+        // Create semaphore for TE synchronization (binary semaphore, initially not taken)
+        if (!s_te_sem) {
+            s_te_sem = xSemaphoreCreateBinary();
+            if (s_te_sem) {
+                s_te_enabled = true;
+                // Register ISR handler
+                gpio_isr_handler_add(s_cfg.pin_te, display_te_isr, NULL);
+                ESP_LOGI(kTag, "TE sync enabled on GPIO %d", s_cfg.pin_te);
+            }
+        }
+    }
+
     st77916_reset();
     err = st77916_init_sequence();
     if (err != ESP_OK) {
@@ -239,6 +279,16 @@ void display_driver_flush(int x1, int y1, int x2, int y2, const void *color_data
             s_flush_cb(s_flush_ctx);
         }
         return;
+    }
+
+    // Wait for TE (Tearing Effect) signal if enabled for sync with display refresh
+    if (s_te_enabled && s_te_sem) {
+        if (xSemaphoreTake(s_te_sem, pdMS_TO_TICKS(50)) == pdTRUE) {
+            // TE signal received, safe to write now
+        } else {
+            // Timeout - proceed anyway to avoid hung display
+            ESP_LOGW(kTag, "TE sync timeout");
+        }
     }
 
     if (x1 < 0) {

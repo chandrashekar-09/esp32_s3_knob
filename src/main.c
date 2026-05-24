@@ -19,26 +19,31 @@
 
 static const char *kTag = "knob_main";
 
-#define PIN_ENC_A 1
-#define PIN_ENC_B 2
+#define PIN_ENC_A 2
+#define PIN_ENC_B 1
 #define PIN_ENC_BTN 0
 
-#define LCD_PIN_CLK 47
-#define LCD_PIN_CS 14
-#define LCD_PIN_SIO0 21
-#define LCD_PIN_SIO1 48
-#define LCD_PIN_SIO2 38
-#define LCD_PIN_SIO3 39
-#define LCD_PIN_RST 40
-#define LCD_PIN_BL 41
+#define LCD_PIN_CLK 11
+#define LCD_PIN_CS 12
+#define LCD_PIN_SIO0 13
+#define LCD_PIN_SIO1 14
+#define LCD_PIN_SIO2 15
+#define LCD_PIN_SIO3 16
+#define LCD_PIN_RST 17
+#define LCD_PIN_TE 18
+#define LCD_PIN_BL 21
 
-#define TOUCH_PIN_SDA 6
-#define TOUCH_PIN_SCL 7
-#define TOUCH_PIN_INT 5
-#define TOUCH_PIN_RST 13
+#define TOUCH_PIN_SDA 9
+#define TOUCH_PIN_SCL 10
+#define TOUCH_PIN_INT 7
+#define TOUCH_PIN_RST 8
 
 #define MESH_ROUTER_SSID   "IIIT-Guest"
 #define MESH_ROUTER_PASS   "f6s68VHJ89mC"
+
+// #define MESH_ROUTER_SSID   "IIIT-Guest"
+// #define MESH_ROUTER_PASS   "f6s68VHJ89mC"
+
 #define MESH_AP_PASS       "mesh_ap_pass"
 
 #define OTA_CURRENT_VERSION 0
@@ -76,6 +81,7 @@ static void ui_task(void *arg)
         .pin_sio2 = LCD_PIN_SIO2,
         .pin_sio3 = LCD_PIN_SIO3,
         .pin_rst = LCD_PIN_RST,
+        .pin_te = LCD_PIN_TE,
         .pin_bl = LCD_PIN_BL,
         .width = 360,
         .height = 360,
