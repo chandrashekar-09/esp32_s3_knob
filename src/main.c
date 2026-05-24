@@ -38,15 +38,15 @@ static const char *kTag = "knob_main";
 #define TOUCH_PIN_INT 7
 #define TOUCH_PIN_RST 8
 
+// #define MESH_ROUTER_SSID   "TEAMPLAYER 9060"
+// #define MESH_ROUTER_PASS   "7mA82;58"
+
 #define MESH_ROUTER_SSID   "IIIT-Guest"
 #define MESH_ROUTER_PASS   "f6s68VHJ89mC"
 
-// #define MESH_ROUTER_SSID   "IIIT-Guest"
-// #define MESH_ROUTER_PASS   "f6s68VHJ89mC"
-
 #define MESH_AP_PASS       "mesh_ap_pass"
 
-#define OTA_CURRENT_VERSION 0
+#define OTA_CURRENT_VERSION 2
 #define OTA_VERSION_URL "https://raw.githubusercontent.com/chandrashekar-09/esp32_s3_knob/main/version.txt"
 #define OTA_FIRMWARE_URL "https://raw.githubusercontent.com/chandrashekar-09/esp32_s3_knob/main/.pio/build/esp32-s3/firmware.bin"
 #define OTA_DEVICE_ID "knob-002"
