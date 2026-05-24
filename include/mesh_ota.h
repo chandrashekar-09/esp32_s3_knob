@@ -19,6 +19,7 @@ typedef struct {
     const char *device_id;
     const char *firebase_boot_ack_base_url;
     const char *firebase_auth_token;
+    const char *expected_sha256;
     size_t chunk_size;
     size_t task_stack;
     int task_prio;
@@ -27,6 +28,10 @@ typedef struct {
 esp_err_t mesh_ota_init(const mesh_ota_config_t *config);
 
 esp_err_t mesh_ota_start(void);
+
+void mesh_ota_notify_mesh_ready(bool is_root);
+void mesh_ota_notify_net_ready(void);
+void mesh_ota_mark_running_valid(void);
 
 void mesh_ota_rx_cb(const mesh_addr_t *from,
                     const uint8_t *data,

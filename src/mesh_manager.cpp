@@ -198,7 +198,7 @@ static void mesh_p2p_rx_task(void *arg)
             continue;
         }
 
-        if (data.size >= sizeof(send_count)) {
+        if (data.size > 25) {
             send_count = (data.data[25] << 24) | (data.data[24] << 16)
                          | (data.data[23] << 8) | data.data[22];
         }
@@ -211,7 +211,7 @@ static void mesh_p2p_rx_task(void *arg)
             mesh_light_process(&from, data.data, data.size);
         }
 
-        if (!(recv_count % 1)) {
+        if (!(recv_count % 50)) {
             ESP_LOGW(kTag,
                      "[#RX:%d/%d][L:%d] parent:" MACSTR ", receive from " MACSTR ", size:%d, heap:%" PRId32 ", flag:%d[err:0x%x, proto:%d, tos:%d]",
                      recv_count,
@@ -233,24 +233,24 @@ static void mesh_p2p_rx_task(void *arg)
 
 static void start_p2p_tasks()
 {
-    if (!s_cfg.enable_demo_p2p) {
-        return;
+    if (s_cfg.enable_demo_p2p && !s_tx_task) {
+        xTaskCreatePinnedToCore(mesh_p2p_tx_task,
+                                "MPTX",
+                                s_cfg.tx_task_stack > 0 ? s_cfg.tx_task_stack : 6144,
+                                NULL,
+                                s_cfg.tx_task_prio > 0 ? s_cfg.tx_task_prio : 5,
+                                &s_tx_task,
+                                0);
     }
-    if (!s_tx_task) {
-        xTaskCreate(mesh_p2p_tx_task,
-                    "MPTX",
-                    s_cfg.tx_task_stack > 0 ? s_cfg.tx_task_stack : 6144,
-                    NULL,
-                    s_cfg.tx_task_prio > 0 ? s_cfg.tx_task_prio : 5,
-                    &s_tx_task);
-    }
-    if (!s_rx_task) {
-        xTaskCreate(mesh_p2p_rx_task,
-                    "MPRX",
-                    s_cfg.rx_task_stack > 0 ? s_cfg.rx_task_stack : 6144,
-                    NULL,
-                    s_cfg.rx_task_prio > 0 ? s_cfg.rx_task_prio : 5,
-                    &s_rx_task);
+
+    if ((s_cfg.enable_demo_p2p || s_cfg.rx_cb) && !s_rx_task) {
+        xTaskCreatePinnedToCore(mesh_p2p_rx_task,
+                                "MPRX",
+                                s_cfg.rx_task_stack > 0 ? s_cfg.rx_task_stack : 6144,
+                                NULL,
+                                s_cfg.rx_task_prio > 0 ? s_cfg.rx_task_prio : 5,
+                                &s_rx_task,
+                                0);
     }
 }
 
