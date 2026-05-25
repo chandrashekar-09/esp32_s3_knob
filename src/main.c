@@ -10,6 +10,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "app_config.h"
+#include "app_mutex.h"
 #include "input_encoder.h"
 #include "lvgl_port.h"
 #include "mesh_manager.h"
@@ -19,40 +21,7 @@
 
 static const char *kTag = "knob_main";
 
-#define PIN_ENC_A 2
-#define PIN_ENC_B 1
-#define PIN_ENC_BTN 0
-
-#define LCD_PIN_CLK 11
-#define LCD_PIN_CS 12
-#define LCD_PIN_SIO0 13
-#define LCD_PIN_SIO1 14
-#define LCD_PIN_SIO2 15
-#define LCD_PIN_SIO3 16
-#define LCD_PIN_RST 17
-#define LCD_PIN_TE 18
-#define LCD_PIN_BL 21
-
-#define TOUCH_PIN_SDA 9
-#define TOUCH_PIN_SCL 10
-#define TOUCH_PIN_INT 7
-#define TOUCH_PIN_RST 8
-
-#define MESH_ROUTER_SSID   "TEAMPLAYER 9060"
-#define MESH_ROUTER_PASS   "7mA82;58"
-
-// #define MESH_ROUTER_SSID   "IIIT-Guest"
-// #define MESH_ROUTER_PASS   "f6s68VHJ89mC"
-
-#define MESH_AP_PASS       "mesh_ap_pass"
-
-#define OTA_CURRENT_VERSION 2
-#define OTA_VERSION_URL "https://raw.githubusercontent.com/chandrashekar-09/esp32_s3_knob/main/version.txt"
-#define OTA_FIRMWARE_URL "https://raw.githubusercontent.com/chandrashekar-09/esp32_s3_knob/main/.pio/build/esp32-s3/firmware.bin"
-#define OTA_DEVICE_ID "knob-002"
-#define OTA_BOOT_ACK_BASE_URL "https://techlora-369-default-rtdb.asia-southeast1.firebasedatabase.app/boot_ack"
-#define OTA_BOOT_ACK_AUTH ""
-#define OTA_EXPECTED_SHA256 ""
+// Configuration lives in app_config.h
 
 static void encoder_event_handler(const encoder_event_t *evt, void *ctx)
 {
@@ -74,31 +43,31 @@ static void ui_task(void *arg)
 {
     display_config_t disp_cfg = {
         .spi_host = SPI2_HOST,
-        .pin_clk = LCD_PIN_CLK,
-        .pin_cs = LCD_PIN_CS,
-        .pin_sio0 = LCD_PIN_SIO0,
-        .pin_sio1 = LCD_PIN_SIO1,
-        .pin_sio2 = LCD_PIN_SIO2,
-        .pin_sio3 = LCD_PIN_SIO3,
-        .pin_rst = LCD_PIN_RST,
-        .pin_te = LCD_PIN_TE,
-        .pin_bl = LCD_PIN_BL,
-        .width = 360,
-        .height = 360,
-        .pclk_hz = 40 * 1000 * 1000,
+        .pin_clk = APP_LCD_PIN_CLK,
+        .pin_cs = APP_LCD_PIN_CS,
+        .pin_sio0 = APP_LCD_PIN_SIO0,
+        .pin_sio1 = APP_LCD_PIN_SIO1,
+        .pin_sio2 = APP_LCD_PIN_SIO2,
+        .pin_sio3 = APP_LCD_PIN_SIO3,
+        .pin_rst = APP_LCD_PIN_RST,
+        .pin_te = APP_LCD_PIN_TE,
+        .pin_bl = APP_LCD_PIN_BL,
+        .width = APP_DISPLAY_WIDTH,
+        .height = APP_DISPLAY_HEIGHT,
+        .pclk_hz = APP_DISPLAY_PCLK_HZ,
         .quad_mode = true,
         .invert_colors = false,
     };
 
     cst816_config_t touch_cfg = {
         .i2c_port = I2C_NUM_0,
-        .pin_sda = TOUCH_PIN_SDA,
-        .pin_scl = TOUCH_PIN_SCL,
-        .pin_int = TOUCH_PIN_INT,
-        .pin_rst = TOUCH_PIN_RST,
+        .pin_sda = APP_TOUCH_PIN_SDA,
+        .pin_scl = APP_TOUCH_PIN_SCL,
+        .pin_int = APP_TOUCH_PIN_INT,
+        .pin_rst = APP_TOUCH_PIN_RST,
         .i2c_addr = 0x15,
-        .max_x = 360,
-        .max_y = 360,
+        .max_x = APP_DISPLAY_WIDTH,
+        .max_y = APP_DISPLAY_HEIGHT,
         .swap_xy = false,
         .invert_x = false,
         .invert_y = false,
@@ -107,6 +76,8 @@ static void ui_task(void *arg)
     lvgl_port_init(&disp_cfg, &touch_cfg);
     ui_engine_init();
     while (true) {
+        phase_manager_tick((uint32_t)(esp_timer_get_time() / 1000ULL));
+        ui_engine_set_phase(phase_manager_get_phase());
         ui_engine_render();
         vTaskDelay(5 / portTICK_PERIOD_MS);
     }
@@ -141,9 +112,9 @@ static void mesh_task(void *arg)
 
     mesh_manager_config_t cfg = {};
     memcpy(cfg.mesh_id, kMeshId, sizeof(kMeshId));
-    cfg.router_ssid = MESH_ROUTER_SSID;
-    cfg.router_pass = MESH_ROUTER_PASS;
-    cfg.mesh_ap_pass = MESH_AP_PASS;
+    cfg.router_ssid = APP_MESH_ROUTER_SSID;
+    cfg.router_pass = APP_MESH_ROUTER_PASS;
+    cfg.mesh_ap_pass = APP_MESH_AP_PASS;
     cfg.channel = 0;
     cfg.max_layer = 15;
     cfg.topology = MESH_TOPO_TREE;
@@ -199,9 +170,9 @@ static void mesh_task(void *arg)
 static void input_init(void)
 {
     encoder_config_t enc_cfg = {
-        .pin_a = PIN_ENC_A,
-        .pin_b = PIN_ENC_B,
-        .pin_btn = PIN_ENC_BTN,
+        .pin_a = APP_PIN_ENC_A,
+        .pin_b = APP_PIN_ENC_B,
+        .pin_btn = APP_PIN_ENC_BTN,
         .glitch_filter_us = 10,
     };
     ESP_ERROR_CHECK(encoder_init(&enc_cfg, encoder_event_handler, NULL));
@@ -209,17 +180,18 @@ static void input_init(void)
 
 void app_main(void)
 {
+    app_mutex_init();
     phase_manager_init();
     input_init();
 
     mesh_ota_config_t ota_cfg = {};
-    ota_cfg.current_version = OTA_CURRENT_VERSION;
-    ota_cfg.version_url = OTA_VERSION_URL;
-    ota_cfg.firmware_url = OTA_FIRMWARE_URL;
-    ota_cfg.device_id = OTA_DEVICE_ID;
-    ota_cfg.firebase_boot_ack_base_url = OTA_BOOT_ACK_BASE_URL;
-    ota_cfg.firebase_auth_token = OTA_BOOT_ACK_AUTH;
-    ota_cfg.expected_sha256 = OTA_EXPECTED_SHA256;
+    ota_cfg.current_version = APP_OTA_CURRENT_VERSION;
+    ota_cfg.version_url = APP_OTA_VERSION_URL;
+    ota_cfg.firmware_url = APP_OTA_FIRMWARE_URL;
+    ota_cfg.device_id = APP_OTA_DEVICE_ID;
+    ota_cfg.firebase_boot_ack_base_url = APP_OTA_BOOT_ACK_BASE_URL;
+    ota_cfg.firebase_auth_token = APP_OTA_BOOT_ACK_AUTH;
+    ota_cfg.expected_sha256 = APP_OTA_EXPECTED_SHA256;
     ota_cfg.chunk_size = 1024;
     ota_cfg.task_stack = 8192;
     ota_cfg.task_prio = 5;

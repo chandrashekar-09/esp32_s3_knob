@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "app_mutex.h"
 #include "ui_engine.h"
 
 #if defined(__has_include)
@@ -109,8 +110,9 @@ bool lvgl_port_init(const display_config_t *disp_cfg, const cst816_config_t *tou
 
     lv_init();
 
+    app_mutex_init();
     if (!xGuiSemaphore) {
-        xGuiSemaphore = xSemaphoreCreateMutex();
+        xGuiSemaphore = app_mutex_get();
     }
 
     if (display_driver_init(&s_disp_cfg) != ESP_OK) {

@@ -25,6 +25,7 @@ typedef struct _lv_obj_t lv_obj_t;
 
 typedef struct {
     phase_t phase;
+    app_state_t app;
     bool mesh_connected;
     bool mesh_root;
     int mesh_layer;
@@ -34,6 +35,7 @@ typedef struct {
 
 static ui_state_t s_ui = {
     .phase = PH_BOOT,
+    .app = {0},
     .mesh_connected = false,
     .mesh_root = false,
     .mesh_layer = -1,
@@ -84,6 +86,64 @@ static const char *kStepLabels[UI_STEP_COUNT] = {
     "08 START",
     "HOME",
 };
+
+static const char *phase_label(phase_t phase)
+{
+    switch (phase) {
+    case PH_OFF:
+        return "POWER OFF";
+    case PH_BOOT:
+        return "BOOT";
+    case PH_ORIENT:
+        return "ORIENT";
+    case PH_USE_CASE:
+        return "USE CASE";
+    case PH_NET:
+        return "NETWORK";
+    case PH_CONN:
+        return "CONNECT";
+    case PH_ASSIGN:
+        return "ASSIGN";
+    case PH_TIME:
+        return "TIME";
+    case PH_OPEN_HR:
+        return "OPEN HOUR";
+    case PH_CLOSE_HR:
+        return "CLOSE HOUR";
+    case PH_CAB_CNT:
+        return "CABIN COUNT";
+    case PH_CAB_INT:
+        return "CABIN INTERVAL";
+    case PH_COR_INT:
+        return "CORRIDOR INTERVAL";
+    case PH_START:
+        return "START";
+    case PH_SPLASH:
+        return "SPLASH";
+    case PH_HOME:
+        return "HOME";
+    case PH_SLEEP:
+        return "SLEEP";
+    case PH_ADMIN:
+        return "ADMIN";
+    case PH_ONLINE_QR:
+        return "ONLINE QR";
+    case PH_WIFI_CONN:
+        return "WIFI CONNECT";
+    case PH_ONLINE_REG:
+        return "ONLINE REG";
+    case PH_LOC_PICK:
+        return "LOC PICK";
+    case PH_LOC_NAMING:
+        return "LOC NAME";
+    case PH_CLEANING_HUB:
+        return "CLEANING HUB";
+    case PH_CLEANING_HUB_FR:
+        return "CLEANING DETAIL";
+    default:
+        return "STATE";
+    }
+}
 
 static uint32_t color_for_level(uint8_t level)
 {
@@ -143,21 +203,7 @@ static void ui_style_step(lv_obj_t *step, bool active)
 
 static void ui_update_steps(phase_t phase)
 {
-    int active = 0;
-    switch (phase) {
-    case PH_HOME:
-        active = 8;
-        break;
-    case PH_BOOT:
-        active = 0;
-        break;
-    case PH_ADMIN:
-    case PH_SLEEP:
-    case PH_OFF:
-    default:
-        active = 8;
-        break;
-    }
+    int active = phase_manager_get_step_index(phase);
 
     for (int i = 0; i < UI_STEP_COUNT; ++i) {
         if (s_steps[i]) {
@@ -229,7 +275,7 @@ static void ui_build(void)
 
 static void ui_apply_home(const ui_state_t *state)
 {
-    uint8_t level = phase_manager_get_queue_level();
+    uint8_t level = state->app.queue_level;
     uint32_t color = color_for_level(level);
 
     lv_label_set_text_fmt(s_center, "Q%u", (unsigned)level);
@@ -257,7 +303,6 @@ static void ui_apply_home(const ui_state_t *state)
     lv_label_set_text(s_hint, "ROTATE QUEUE  HOLD ADMIN");
     lv_obj_set_style_text_color(s_center, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_text_color(s_hint, lv_color_hex(UI_TEXT_FAINT_HEX), LV_PART_MAIN);
-    (void)state;
 }
 
 static void ui_apply_admin(const ui_state_t *state)
@@ -298,6 +343,55 @@ static void ui_apply_boot(void)
     lv_label_set_text(s_hint, "BOOTING");
 }
 
+static void ui_apply_setup(const ui_state_t *state)
+{
+    for (int i = 0; i < 4; ++i) {
+        lv_arc_set_value(s_rings[i], 2 + i);
+        lv_obj_set_style_arc_color(s_rings[i], lv_color_hex(UI_TRACK_HEX), LV_PART_INDICATOR);
+    }
+
+    lv_label_set_text(s_center, phase_label(state->phase));
+    lv_obj_set_style_text_color(s_center, lv_color_hex(UI_ACCENT_HEX), LV_PART_MAIN);
+
+    switch (state->phase) {
+    case PH_USE_CASE:
+        lv_label_set_text_fmt(s_level, "UC %d", (int)state->app.use_case_sel + 1);
+        break;
+    case PH_NET:
+        lv_label_set_text_fmt(s_level, "NET %d", (int)state->app.net_sel + 1);
+        break;
+    case PH_TIME:
+        lv_label_set_text_fmt(s_level, "%04u-%02u-%02u",
+                              (unsigned)state->app.time_fields[0],
+                              (unsigned)state->app.time_fields[1],
+                              (unsigned)state->app.time_fields[2]);
+        break;
+    case PH_OPEN_HR:
+        lv_label_set_text_fmt(s_level, "OPEN %02u:00", (unsigned)state->app.open_hour);
+        break;
+    case PH_CLOSE_HR:
+        lv_label_set_text_fmt(s_level, "CLOSE %02u:00", (unsigned)state->app.close_hour);
+        break;
+    case PH_CAB_CNT:
+        lv_label_set_text_fmt(s_level, "CABINS %u", (unsigned)state->app.cab_count);
+        break;
+    case PH_CAB_INT:
+        lv_label_set_text_fmt(s_level, "CAB INT %u", (unsigned)state->app.cab_int);
+        break;
+    case PH_COR_INT:
+        lv_label_set_text_fmt(s_level, "COR INT %u", (unsigned)state->app.cor_int);
+        break;
+    case PH_ORIENT:
+        lv_label_set_text_fmt(s_level, "ORIENT %u", (unsigned)state->app.orient_pos);
+        break;
+    default:
+        lv_label_set_text(s_level, "CONFIG");
+        break;
+    }
+
+    lv_label_set_text(s_hint, "PRESS TO ADVANCE");
+}
+
 static void ui_apply_state(const ui_state_t *state)
 {
     ui_update_steps(state->phase);
@@ -325,8 +419,10 @@ static void ui_apply_state(const ui_state_t *state)
         ui_apply_boot();
         break;
     case PH_HOME:
-    default:
         ui_apply_home(state);
+        break;
+    default:
+        ui_apply_setup(state);
         break;
     }
 }
@@ -352,6 +448,7 @@ void ui_engine_set_phase(phase_t phase)
 {
     portENTER_CRITICAL(&s_ui_mux);
     s_ui.phase = phase;
+    phase_manager_get_state(&s_ui.app);
     s_ui.dirty = true;
     portEXIT_CRITICAL(&s_ui_mux);
 }
@@ -381,6 +478,7 @@ void ui_engine_render(void)
         if (consume_dirty()) {
             ui_state_t snapshot = {};
             copy_state(&snapshot);
+            phase_manager_get_state(&snapshot.app);
             ui_apply_state(&snapshot);
         }
         lv_timer_handler();

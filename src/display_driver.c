@@ -7,8 +7,8 @@
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #define ST77916_CMD_SWRESET 0x01
 #define ST77916_CMD_SLPOUT  0x11
@@ -32,7 +32,6 @@ static void *s_flush_ctx = NULL;
 static SemaphoreHandle_t s_te_sem = NULL;
 static volatile bool s_te_enabled = false;
 
-// ISR handler for TE signal
 static void IRAM_ATTR display_te_isr(void *arg)
 {
     (void)arg;
@@ -158,6 +157,36 @@ static esp_err_t st77916_set_window(int x1, int y1, int x2, int y2)
     return st77916_write_cmd(ST77916_CMD_RAMWR);
 }
 
+static void display_te_setup(void)
+{
+    if (s_cfg.pin_te < 0) {
+        return;
+    }
+
+    gpio_config_t te_conf = {};
+    te_conf.pin_bit_mask = (1ULL << s_cfg.pin_te);
+    te_conf.mode = GPIO_MODE_INPUT;
+    te_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    te_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    te_conf.intr_type = GPIO_INTR_POSEDGE;
+    gpio_config(&te_conf);
+
+    if (!s_te_sem) {
+        s_te_sem = xSemaphoreCreateBinary();
+    }
+    if (!s_te_sem) {
+        return;
+    }
+
+    esp_err_t err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(kTag, "GPIO ISR service init failed (%d)", err);
+    }
+    gpio_isr_handler_add(s_cfg.pin_te, display_te_isr, NULL);
+    s_te_enabled = true;
+    ESP_LOGI(kTag, "TE sync enabled on GPIO %d", s_cfg.pin_te);
+}
+
 esp_err_t display_driver_init(const display_config_t *config)
 {
     if (!config) {
@@ -203,28 +232,7 @@ esp_err_t display_driver_init(const display_config_t *config)
         return err;
     }
 
-    // Initialize TE (Tearing Effect) GPIO for synchronization
-    if (s_cfg.pin_te >= 0) {
-        gpio_config_t te_conf = {};
-        te_conf.pin_bit_mask = (1ULL << s_cfg.pin_te);
-        te_conf.mode = GPIO_MODE_INPUT;
-        te_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-        te_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        te_conf.intr_type = GPIO_INTR_POSEDGE;
-        gpio_config(&te_conf);
-
-        // Create semaphore for TE synchronization (binary semaphore, initially not taken)
-        if (!s_te_sem) {
-            s_te_sem = xSemaphoreCreateBinary();
-            if (s_te_sem) {
-                s_te_enabled = true;
-                // Register ISR handler
-                gpio_isr_handler_add(s_cfg.pin_te, display_te_isr, NULL);
-                ESP_LOGI(kTag, "TE sync enabled on GPIO %d", s_cfg.pin_te);
-            }
-        }
-    }
-
+    display_te_setup();
     st77916_reset();
     err = st77916_init_sequence();
     if (err != ESP_OK) {
@@ -281,12 +289,8 @@ void display_driver_flush(int x1, int y1, int x2, int y2, const void *color_data
         return;
     }
 
-    // Wait for TE (Tearing Effect) signal if enabled for sync with display refresh
     if (s_te_enabled && s_te_sem) {
-        if (xSemaphoreTake(s_te_sem, pdMS_TO_TICKS(50)) == pdTRUE) {
-            // TE signal received, safe to write now
-        } else {
-            // Timeout - proceed anyway to avoid hung display
+        if (xSemaphoreTake(s_te_sem, pdMS_TO_TICKS(50)) != pdTRUE) {
             ESP_LOGW(kTag, "TE sync timeout");
         }
     }

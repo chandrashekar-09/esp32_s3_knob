@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "app_mutex.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -66,6 +67,7 @@ esp_err_t cst816_init(const cst816_config_t *config)
     }
 
     s_cfg = *config;
+    app_mutex_init();
 
     i2c_config_t i2c_conf = {
         .mode = I2C_MODE_MASTER,
