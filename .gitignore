@@ -16,9 +16,8 @@
 !.pio/build/esp32dev/
 .pio/build/esp32dev/*
 
-!.pio/build/esp32-s3/
-.pio/build/esp32-s3/*
+# !.pio/build/esp32dev/
+# .pio/build/esp32dev/*
 
 # 4. Explicitly allow ONLY the firmware.bin file
 !.pio/build/esp32dev/firmware.bin
-!.pio/build/esp32-s3/firmware.bin
