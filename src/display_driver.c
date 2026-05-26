@@ -461,7 +461,12 @@ void display_driver_set_backlight(uint8_t percent)
 /* Per-chunk hardware ceiling: ESP32-S3 SPI MOSI length register is 18
  * bits → 32767 bytes max per single `spi_transaction_t`. We split below
  * that with plenty of headroom (16 KB ≈ 22 rows at 360 px wide). */
-#define DISPLAY_FLUSH_MAX_CHUNK_BYTES (16 * 1024)
+/* Max single SPI transaction: 32 767 bytes is the ESP32-S3 hardware
+ * ceiling (18-bit MOSI length register). 32 000 leaves a safety margin
+ * and lets a 40-row (28 800-byte) strip fit in ONE chunk — eliminating
+ * the multi-chunk CS_KEEP_ACTIVE pattern for typical LVGL flushes and
+ * the strip-based color cycle in main.c. */
+#define DISPLAY_FLUSH_MAX_CHUNK_BYTES (32 * 1000)
 
 static esp_err_t set_window(int x1, int y1, int x2, int y2)
 {
@@ -508,7 +513,13 @@ static esp_err_t tx_color_stream(const uint8_t *buf, size_t len)
         if (first) {
             ext.base.flags = SPI_TRANS_MODE_QIO;
             ext.base.cmd   = ST77916_OPCODE_WRITE_COLOR;
-            ext.base.addr  = ((uint32_t)ST77916_CMD_RAMWRC) << 8;
+            /* RAMWR (0x2C), not RAMWRC (0x3C) — the manufacturer's
+             * ESP_PanelLcd_ST77916 + Espressif's esp_lcd_st77916 both
+             * use RAMWR. RAMWRC is "memory write continue", but the
+             * panel may not transition cleanly from CASET/RASET into
+             * a continuation write — it expects a fresh RAMWR to
+             * engage the new window. */
+            ext.base.addr  = ((uint32_t)ST77916_CMD_RAMWR) << 8;
             first = false;
         } else {
             /* Skip the cmd/addr/dummy phases entirely — keep streaming

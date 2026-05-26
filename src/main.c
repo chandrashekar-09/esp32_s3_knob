@@ -127,42 +127,58 @@ static void display_task(void *arg)
         return;
     }
 
-    /* Full-frame buffer in PSRAM. DMA-friendly aligned alloc. */
-    const size_t frame_bytes =
-        (size_t)APP_DISPLAY_WIDTH * APP_DISPLAY_HEIGHT * sizeof(uint16_t);
-    uint16_t *frame = heap_caps_aligned_alloc(
-        4, frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
-    if (!frame) {
-        /* DMA-capable PSRAM may not be available on all SDKs — fall back
-         * to plain PSRAM alloc which the SPI driver will bounce through
-         * internal DMA. */
-        frame = heap_caps_aligned_alloc(
-            4, frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    }
-    if (!frame) {
-        ESP_LOGE(TAG_DISPLAY, "PSRAM frame buffer alloc FAILED (%u bytes)",
-                 (unsigned)frame_bytes);
+    /* Strip-based fill — mirrors the manufacturer's ST77916_LVGL_DEMO
+     * which allocates its LVGL draw buffer in MALLOC_CAP_INTERNAL (DMA-
+     * capable internal SRAM, no PSRAM cache coherency issues). Strip
+     * height chosen so one strip = one single SPI transaction (under
+     * the 32 KB hardware ceiling): 40 rows × 360 px × 2 B = 28 800 B.
+     *
+     *   40 rows × 9 strips = 360 rows total.
+     *
+     * This avoids:
+     *   - PSRAM-to-DMA cache flush alignment problems
+     *   - Multi-chunk CS_KEEP_ACTIVE streaming entirely (each strip is
+     *     a single transaction, plain CS toggling)
+     *   - The 252 KB PSRAM allocation pressure */
+    #define STRIP_ROWS  40
+    _Static_assert(APP_DISPLAY_HEIGHT % STRIP_ROWS == 0,
+                   "panel height must be a clean multiple of STRIP_ROWS");
+    const size_t strip_pixels = (size_t)APP_DISPLAY_WIDTH * STRIP_ROWS;
+    const size_t strip_bytes  = strip_pixels * sizeof(uint16_t);
+    const size_t num_strips   = APP_DISPLAY_HEIGHT / STRIP_ROWS;
+
+    uint16_t *strip = heap_caps_aligned_alloc(
+        16, strip_bytes,
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (!strip) {
+        ESP_LOGE(TAG_DISPLAY, "strip buffer alloc FAILED (%u bytes)",
+                 (unsigned)strip_bytes);
         vTaskDelete(NULL);
         return;
     }
-    ESP_LOGI(TAG_DISPLAY, "frame buf: %u bytes in PSRAM @ %p",
-             (unsigned)frame_bytes, frame);
+    ESP_LOGI(TAG_DISPLAY, "strip buf: %u bytes in internal DMA RAM @ %p (%u strips)",
+             (unsigned)strip_bytes, strip, (unsigned)num_strips);
 
     ESP_LOGI(TAG_DISPLAY, "entering color cycle");
     size_t idx = 0;
-    const size_t pixels = (size_t)APP_DISPLAY_WIDTH * APP_DISPLAY_HEIGHT;
     while (true) {
         const color_step_t *c = &kColors[idx];
         uint16_t v = s_color_pixel[idx];
 
+        /* Pre-fill the strip buffer once per color (same for all strips). */
+        for (size_t i = 0; i < strip_pixels; ++i) strip[i] = v;
+
         int64_t t0 = esp_timer_get_time();
-        for (size_t i = 0; i < pixels; ++i) frame[i] = v;
-        display_driver_flush(0, 0, APP_DISPLAY_WIDTH - 1,
-                             APP_DISPLAY_HEIGHT - 1, frame, frame_bytes);
+        for (size_t s = 0; s < num_strips; ++s) {
+            int y0 = (int)(s * STRIP_ROWS);
+            int y1 = y0 + STRIP_ROWS - 1;
+            display_driver_flush(0, y0, APP_DISPLAY_WIDTH - 1, y1,
+                                 strip, strip_bytes);
+        }
         int64_t t1 = esp_timer_get_time();
 
-        ESP_LOGI(TAG_DISPLAY, "FILL %-7s 0x%04X  (%lld ms)",
-                 c->name, v, (long long)((t1 - t0) / 1000));
+        ESP_LOGI(TAG_DISPLAY, "FILL %-7s 0x%04X  (%lld ms, %u strips)",
+                 c->name, v, (long long)((t1 - t0) / 1000), (unsigned)num_strips);
 
         vTaskDelay(pdMS_TO_TICKS(1500));
         idx = (idx + 1) % NUM_COLORS;
