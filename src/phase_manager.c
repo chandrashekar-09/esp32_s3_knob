@@ -316,33 +316,32 @@ int phase_manager_get_step_index(phase_t phase)
     switch (phase) {
     case PH_USE_CASE:
         return 0;
+    case PH_ASSIGN:
     case PH_NET:
     case PH_CONN:
     case PH_WIFI_CONN:
     case PH_ONLINE_QR:
     case PH_ONLINE_REG:
         return 1;
-    case PH_ASSIGN:
-        return 2;
     case PH_TIME:
     case PH_OPEN_HR:
     case PH_CLOSE_HR:
-        return 3;
+        return 2;
     case PH_CAB_CNT:
-        return 4;
+        return 3;
     case PH_CAB_INT:
-        return 5;
+        return 4;
     case PH_COR_INT:
-        return 6;
+        return 5;
     case PH_START:
     case PH_SPLASH:
     case PH_SYNC:
-        return 7;
+        return 6;
     case PH_HOME:
     case PH_ADMIN:
     case PH_SLEEP:
     case PH_OFF:
     default:
-        return 8;
+        return 7;
     }
 }

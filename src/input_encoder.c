@@ -85,6 +85,11 @@ static void encoder_task(void *arg)
         int count = 0;
         if (pcnt_unit_get_count(s_unit, &count) == ESP_OK) {
             int delta = count - s_last_count;
+            if (delta > 4) {
+                delta = 4;
+            } else if (delta < -4) {
+                delta = -4;
+            }
             if (delta != 0) {
                 s_last_count = count;
                 encoder_report_delta(delta);

@@ -21,7 +21,11 @@ typedef struct _lv_obj_t lv_obj_t;
 #define UI_TEXT_DIM_HEX 0x555555
 #define UI_TEXT_FAINT_HEX 0x222222
 #define UI_BG_HEX 0x000000
-#define UI_STEP_COUNT 9
+#define UI_BG_SOFT_HEX 0x0F0F0F
+#define UI_BG_DOT_HEX 0x15151A
+#define UI_STEP_COUNT 8
+#define UI_ARC_START 140
+#define UI_ARC_END 40
 
 typedef struct {
     phase_t phase;
@@ -72,18 +76,19 @@ static lv_obj_t *s_center = NULL;
 static lv_obj_t *s_level = NULL;
 static lv_obj_t *s_hint = NULL;
 static lv_obj_t *s_ota = NULL;
+static lv_obj_t *s_bg = NULL;
+static lv_color_t *s_bg_buf = NULL;
 static lv_obj_t *s_rings[4] = {};
 static lv_obj_t *s_steps[UI_STEP_COUNT] = {};
 
 static const char *kStepLabels[UI_STEP_COUNT] = {
     "01 USE CASE",
-    "02 NETWORK",
-    "03 ASSIGN",
-    "04 TIME",
-    "05 CABINS",
-    "06 CABIN INT",
-    "07 CORR INT",
-    "08 START",
+    "02 ASSIGN",
+    "03 HOURS",
+    "04 CABINS",
+    "05 CAB INT",
+    "06 COR INT",
+    "07 START",
     "HOME",
 };
 
@@ -161,9 +166,9 @@ static void arc_setup(lv_obj_t *arc, int size, int width)
 {
     lv_obj_set_size(arc, size, size);
     lv_obj_center(arc);
-    lv_arc_set_range(arc, 0, 8);
+    lv_arc_set_range(arc, 0, 100);
     lv_arc_set_value(arc, 0);
-    lv_arc_set_bg_angles(arc, 0, 360);
+    lv_arc_set_bg_angles(arc, UI_ARC_START, UI_ARC_END);
     lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_arc_width(arc, width, LV_PART_MAIN);
     lv_obj_set_style_arc_width(arc, width, LV_PART_INDICATOR);
@@ -171,6 +176,25 @@ static void arc_setup(lv_obj_t *arc, int size, int width)
     lv_obj_set_style_arc_color(arc, lv_color_hex(UI_ACCENT_HEX), LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_KNOB);
     lv_obj_set_style_pad_all(arc, 0, LV_PART_KNOB);
+}
+
+static void draw_dot_background(lv_obj_t *canvas)
+{
+    int width = lv_obj_get_width(canvas);
+    int height = lv_obj_get_height(canvas);
+
+    lv_canvas_fill_bg(canvas, lv_color_hex(UI_BG_HEX), LV_OPA_COVER);
+    lv_color_t dot = lv_color_hex(UI_BG_DOT_HEX);
+
+    for (int y = 3; y < height; y += 6) {
+        int dy = y - height / 2;
+        for (int x = 3; x < width; x += 6) {
+            int dx = x - width / 2;
+            if ((dx * dx + dy * dy) < ((width / 2) * (width / 2))) {
+                lv_canvas_set_px(canvas, x, y, dot);
+            }
+        }
+    }
 }
 
 static lv_obj_t *make_label(const char *text,
@@ -193,12 +217,22 @@ static lv_obj_t *make_label(const char *text,
     return label;
 }
 
-static void ui_style_step(lv_obj_t *step, bool active)
+static void ui_style_step(lv_obj_t *step, int state)
 {
-    uint32_t color = active ? UI_ACCENT_HEX : UI_TEXT_FAINT_HEX;
+    uint32_t color = UI_TEXT_FAINT_HEX;
+    uint32_t bg = UI_BG_HEX;
+
+    if (state == 1) {
+        color = UI_ACCENT_HEX;
+        bg = UI_BG_SOFT_HEX;
+    } else if (state == 2) {
+        color = UI_TEXT_FAINT_HEX;
+        bg = UI_BG_SOFT_HEX;
+    }
+
     lv_obj_set_style_text_color(step, lv_color_hex(color), LV_PART_MAIN);
     lv_obj_set_style_border_color(step, lv_color_hex(color), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(step, lv_color_hex(UI_BG_HEX), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(step, lv_color_hex(bg), LV_PART_MAIN);
 }
 
 static void ui_update_steps(phase_t phase)
@@ -206,9 +240,17 @@ static void ui_update_steps(phase_t phase)
     int active = phase_manager_get_step_index(phase);
 
     for (int i = 0; i < UI_STEP_COUNT; ++i) {
-        if (s_steps[i]) {
-            ui_style_step(s_steps[i], i == active);
+        if (!s_steps[i]) {
+            continue;
         }
+
+        int state = 0;
+        if (i == active) {
+            state = 1;
+        } else if (i < active) {
+            state = 2;
+        }
+        ui_style_step(s_steps[i], state);
     }
 }
 
@@ -219,35 +261,48 @@ static void ui_build(void)
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(UI_BG_HEX), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, LV_PART_MAIN);
 
+    s_bg = lv_canvas_create(s_screen);
+    lv_obj_set_size(s_bg, lv_obj_get_width(s_screen), lv_obj_get_height(s_screen));
+    lv_obj_clear_flag(s_bg, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_border_width(s_bg, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_bg, 0, LV_PART_MAIN);
+
+    size_t buf_pixels = (size_t)lv_obj_get_width(s_screen) * (size_t)lv_obj_get_height(s_screen);
+    s_bg_buf = lv_mem_alloc(buf_pixels * sizeof(lv_color_t));
+    if (s_bg_buf) {
+        lv_canvas_set_buffer(s_bg, s_bg_buf,
+                             lv_obj_get_width(s_screen),
+                             lv_obj_get_height(s_screen),
+                             LV_IMG_CF_TRUE_COLOR);
+        draw_dot_background(s_bg);
+    }
+    lv_obj_move_background(s_bg);
+
     s_rings[0] = lv_arc_create(s_screen);
     s_rings[1] = lv_arc_create(s_screen);
     s_rings[2] = lv_arc_create(s_screen);
     s_rings[3] = lv_arc_create(s_screen);
-    arc_setup(s_rings[0], 336, 7);
-    arc_setup(s_rings[1], 310, 5);
-    arc_setup(s_rings[2], 288, 4);
-    arc_setup(s_rings[3], 266, 3);
+    arc_setup(s_rings[0], 320, 6);
+    arc_setup(s_rings[1], 296, 5);
+    arc_setup(s_rings[2], 274, 4);
+    arc_setup(s_rings[3], 252, 3);
 
-    s_wordmark = make_label("QUESORT", LV_ALIGN_TOP_MID, 0, 10, UI_ACCENT_HEX, 4, &lv_font_montserrat_14);
-    s_subtitle = make_label("MULTI-SPECTRUM", LV_ALIGN_TOP_MID, 0, 26, UI_TEXT_FAINT_HEX, 2, &lv_font_montserrat_10);
-    make_label("UNIFIED SIMULATOR", LV_ALIGN_TOP_MID, 0, 40, UI_TEXT_FAINT_HEX, 2, &lv_font_montserrat_10);
+    s_wordmark = make_label("QUESORT", LV_ALIGN_TOP_MID, 0, 8, UI_ACCENT_HEX, 4, &lv_font_montserrat_12);
+    s_subtitle = make_label("MULTI-SPECTRUM", LV_ALIGN_TOP_MID, 0, 22, UI_TEXT_FAINT_HEX, 2, &lv_font_montserrat_8);
+    make_label("UNIFIED SIMULATOR", LV_ALIGN_TOP_MID, 0, 34, UI_TEXT_FAINT_HEX, 2, &lv_font_montserrat_8);
 
-    const int step_w = 108;
-    const int step_h = 16;
+    const int step_w = 78;
+    const int step_h = 13;
     const int step_gap = 4;
-    const int rows = 3;
-    const int cols = 3;
+    const int rows = 2;
+    const int cols = 4;
     const int grid_w = cols * step_w + (cols - 1) * step_gap;
     const int start_x = (lv_obj_get_width(s_screen) - grid_w) / 2;
-    const int start_y = 58;
+    const int start_y = 46;
 
     for (int i = 0; i < UI_STEP_COUNT; ++i) {
         int row = i / cols;
         int col = i % cols;
-        if (row >= rows) {
-            row = rows - 1;
-            col = cols - 1;
-        }
 
         lv_obj_t *step = lv_label_create(s_screen);
         lv_label_set_text(step, kStepLabels[i]);
@@ -257,20 +312,31 @@ static void ui_build(void)
                    start_x + col * (step_w + step_gap),
                    start_y + row * (step_h + 2));
         lv_obj_set_style_text_align(step, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_style_text_font(step, &lv_font_montserrat_10, LV_PART_MAIN);
+        lv_obj_set_style_text_font(step, &lv_font_montserrat_8, LV_PART_MAIN);
         lv_obj_set_style_text_letter_space(step, 1, LV_PART_MAIN);
         lv_obj_set_style_border_width(step, 1, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(step, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(step, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_pad_left(step, 0, LV_PART_MAIN);
         lv_obj_set_style_pad_right(step, 0, LV_PART_MAIN);
         s_steps[i] = step;
     }
 
-    s_status = make_label("POWER ON TO BEGIN", LV_ALIGN_TOP_MID, 0, 120, UI_TEXT_DIM_HEX, 2, &lv_font_montserrat_10);
-    s_center = make_label("Q1", LV_ALIGN_CENTER, 0, -12, 0xFFFFFF, 2, &lv_font_montserrat_16);
-    s_level = make_label("EMPTY", LV_ALIGN_CENTER, 0, 18, UI_ACCENT_HEX, 3, &lv_font_montserrat_12);
-    s_hint = make_label("ROTATE QUEUE  HOLD ADMIN", LV_ALIGN_BOTTOM_MID, 0, -38, UI_TEXT_FAINT_HEX, 1, &lv_font_montserrat_10);
-    s_ota = make_label("OTA WAITING", LV_ALIGN_BOTTOM_MID, 0, -18, UI_TEXT_DIM_HEX, 1, &lv_font_montserrat_10);
+    s_status = make_label("POWER ON TO BEGIN", LV_ALIGN_TOP_MID, 0, 82, UI_TEXT_DIM_HEX, 2, &lv_font_montserrat_8);
+    s_center = make_label("Q1", LV_ALIGN_CENTER, 0, -12, 0xFFFFFF, 2, &lv_font_montserrat_28);
+    s_level = make_label("EMPTY", LV_ALIGN_CENTER, 0, 22, UI_ACCENT_HEX, 2, &lv_font_montserrat_12);
+    s_hint = make_label("ROTATE QUEUE  HOLD ADMIN", LV_ALIGN_BOTTOM_MID, 0, -46, UI_TEXT_FAINT_HEX, 1, &lv_font_montserrat_8);
+    s_ota = make_label("OTA WAITING", LV_ALIGN_BOTTOM_MID, 0, -26, UI_TEXT_DIM_HEX, 1, &lv_font_montserrat_8);
+}
+
+static int ring_value(uint8_t level)
+{
+    if (level < 1) {
+        return 0;
+    }
+    if (level > 8) {
+        level = 8;
+    }
+    return (int)(level * 100 / 8);
 }
 
 static void ui_apply_home(const ui_state_t *state)
@@ -279,6 +345,7 @@ static void ui_apply_home(const ui_state_t *state)
     uint32_t color = color_for_level(level);
 
     lv_label_set_text_fmt(s_center, "Q%u", (unsigned)level);
+    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_28, LV_PART_MAIN);
     lv_label_set_text(s_level, label_for_level(level));
     lv_obj_set_style_text_color(s_level, lv_color_hex(color), LV_PART_MAIN);
 
@@ -296,7 +363,7 @@ static void ui_apply_home(const ui_state_t *state)
     };
 
     for (int i = 0; i < 4; ++i) {
-        lv_arc_set_value(s_rings[i], peer_values[i]);
+        lv_arc_set_value(s_rings[i], ring_value(peer_values[i]));
         lv_obj_set_style_arc_color(s_rings[i], lv_color_hex(ring_colors[i]), LV_PART_INDICATOR);
     }
 
@@ -308,11 +375,12 @@ static void ui_apply_home(const ui_state_t *state)
 static void ui_apply_admin(const ui_state_t *state)
 {
     for (int i = 0; i < 4; ++i) {
-        lv_arc_set_value(s_rings[i], 8);
+        lv_arc_set_value(s_rings[i], ring_value(8));
         lv_obj_set_style_arc_color(s_rings[i], lv_color_hex(i == 0 ? UI_ACCENT_HEX : UI_TRACK_HEX), LV_PART_INDICATOR);
     }
 
     lv_label_set_text(s_center, "ADMIN");
+    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_label_set_text_fmt(s_level, "%s  L%d",
                           state->mesh_root ? "ROOT" : "NODE",
                           state->mesh_layer);
@@ -326,6 +394,7 @@ static void ui_apply_sleep(void)
         lv_arc_set_value(s_rings[i], 0);
     }
     lv_label_set_text(s_center, "SLEEP");
+    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_label_set_text(s_level, "TAP TO WAKE");
     lv_obj_set_style_text_color(s_level, lv_color_hex(UI_TEXT_DIM_HEX), LV_PART_MAIN);
     lv_label_set_text(s_hint, "LOW POWER");
@@ -334,10 +403,11 @@ static void ui_apply_sleep(void)
 static void ui_apply_boot(void)
 {
     for (int i = 0; i < 4; ++i) {
-        lv_arc_set_value(s_rings[i], i + 2);
+        lv_arc_set_value(s_rings[i], ring_value((uint8_t)(i + 2)));
         lv_obj_set_style_arc_color(s_rings[i], lv_color_hex(i == 0 ? UI_ACCENT_HEX : UI_TRACK_HEX), LV_PART_INDICATOR);
     }
-    lv_label_set_text(s_center, "START");
+    lv_label_set_text(s_center, "STARTING UP");
+    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_label_set_text(s_level, "PLEASE WAIT");
     lv_obj_set_style_text_color(s_level, lv_color_hex(UI_TEXT_DIM_HEX), LV_PART_MAIN);
     lv_label_set_text(s_hint, "BOOTING");
@@ -346,11 +416,12 @@ static void ui_apply_boot(void)
 static void ui_apply_setup(const ui_state_t *state)
 {
     for (int i = 0; i < 4; ++i) {
-        lv_arc_set_value(s_rings[i], 2 + i);
+        lv_arc_set_value(s_rings[i], ring_value((uint8_t)(2 + i)));
         lv_obj_set_style_arc_color(s_rings[i], lv_color_hex(UI_TRACK_HEX), LV_PART_INDICATOR);
     }
 
     lv_label_set_text(s_center, phase_label(state->phase));
+    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_center, lv_color_hex(UI_ACCENT_HEX), LV_PART_MAIN);
 
     switch (state->phase) {
@@ -389,13 +460,16 @@ static void ui_apply_setup(const ui_state_t *state)
         break;
     }
 
-    lv_label_set_text(s_hint, "PRESS TO ADVANCE");
+    lv_label_set_text(s_hint, "ROTATE  TAP = CONFIRM");
 }
 
 static void ui_apply_state(const ui_state_t *state)
 {
     ui_update_steps(state->phase);
-    if (state->mesh_connected) {
+    if (state->mesh_layer < 0) {
+        lv_label_set_text(s_status, "LOCAL MODE");
+        lv_obj_set_style_text_color(s_status, lv_color_hex(UI_TEXT_DIM_HEX), LV_PART_MAIN);
+    } else if (state->mesh_connected) {
         lv_label_set_text_fmt(s_status, "%s  L%d",
                               state->mesh_root ? "MESH ROOT" : "MESH NODE",
                               state->mesh_layer);
