@@ -91,7 +91,10 @@ static void encoder_task(void *arg)
             }
         }
         encoder_poll_button();
-        vTaskDelay(pdMS_TO_TICKS(5));
+        /* 10ms not 5ms — at CONFIG_FREERTOS_HZ=100 the latter rounds to 0
+         * ticks (vTaskDelay(0)) which doesn't actually block, starving
+         * IDLE1 and tripping the task watchdog. */
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -152,7 +155,7 @@ esp_err_t encoder_init(const encoder_config_t *config, encoder_event_cb_t cb, vo
 
     pcnt_unit_get_count(s_unit, &s_last_count);
 
-    xTaskCreatePinnedToCore(encoder_task, "encoder_task", 3072, NULL, 6, NULL, 1);
+    xTaskCreatePinnedToCore(encoder_task, "encoder_task", 3072, NULL, 5, NULL, 1);
 
     ESP_LOGI(kTag, "encoder ready");
     return ESP_OK;

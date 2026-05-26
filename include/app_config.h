@@ -14,7 +14,11 @@
 #define APP_LCD_PIN_SIO2 15
 #define APP_LCD_PIN_SIO3 16
 #define APP_LCD_PIN_RST 17
-#define APP_LCD_PIN_TE 18
+/* TE line is on GPIO 18 in the K718 schematic but the panel does not
+ * actually pulse it on this board revision. The Arduino bring-up test
+ * (Arduino_GFX, no TE wiring) confirms the display works fine without
+ * vsync. Setting -1 disables our TE ISR + per-frame wait. */
+#define APP_LCD_PIN_TE  (-1)
 #define APP_LCD_PIN_BL 21
 
 #define APP_TOUCH_PIN_SDA 9
@@ -24,7 +28,9 @@
 
 #define APP_DISPLAY_WIDTH 360
 #define APP_DISPLAY_HEIGHT 360
-#define APP_DISPLAY_PCLK_HZ (40 * 1000 * 1000)
+/* 50 MHz matches the manufacturer's ST77916_LVGL_DEMO/scr_st77916.h
+ * `TFT_SPI_FREQ_HZ` exactly. The panel module is qualified at this rate. */
+#define APP_DISPLAY_PCLK_HZ (50 * 1000 * 1000)
 
 #define APP_MESH_ROUTER_SSID "IIIT-Guest"
 #define APP_MESH_ROUTER_PASS "f6s68VHJ89mC"
