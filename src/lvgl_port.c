@@ -124,25 +124,29 @@ bool lvgl_port_init(const display_config_t *disp_cfg, const cst816_config_t *tou
         ESP_LOGW(kTag, "touch init failed");
     }
 
-    size_t buf_pixels = (size_t)s_disp_cfg.width * 40;
-    lv_color_t *buf1 = heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    lv_color_t *buf2 = heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf1 || !buf2) {
-        if (buf1) {
-            heap_caps_free(buf1);
-        }
-        if (buf2) {
-            heap_caps_free(buf2);
-        }
-        ESP_LOGW(kTag, "PSRAM draw buffers unavailable, using internal heap");
-        buf1 = heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        buf2 = heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-
-    if (!buf1 || !buf2) {
-        ESP_LOGE(kTag, "LVGL draw buffer allocation failed");
+    /* 40-row partial-mode draw buffer in INTERNAL DMA-capable SRAM —
+     * NOT PSRAM. PSRAM-backed buffers triggered the alternating-row
+     * stripe artifact (cache lines half-stale on DMA read). Internal
+     * DRAM is cache-coherent for DMA by construction.
+     *
+     * SINGLE buffer (not double-buffered): our `display_driver_flush`
+     * is synchronous (polling-mode SPI), so there's no parallelism
+     * benefit from a second buffer. A single buffer keeps the flush
+     * timeline tight and rules out double-buffer coordination glitches
+     * showing up as top-of-screen tearing. 28 800 bytes fits one SPI
+     * transaction (under the 32 KB hardware ceiling). */
+    const size_t buf_pixels = (size_t)s_disp_cfg.width * 40;
+    const size_t buf_bytes  = buf_pixels * sizeof(lv_color_t);
+    lv_color_t *buf1 = heap_caps_aligned_alloc(
+        16, buf_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    lv_color_t *buf2 = NULL;
+    if (!buf1) {
+        ESP_LOGE(kTag, "LVGL draw buffer alloc failed (%u bytes)",
+                 (unsigned)buf_bytes);
         return false;
     }
+    ESP_LOGI(kTag, "LVGL buf: %u bytes in internal DMA RAM",
+             (unsigned)buf_bytes);
 
 #if LVGL_VERSION_MAJOR >= 9
     s_disp = lv_display_create(s_disp_cfg.width, s_disp_cfg.height);

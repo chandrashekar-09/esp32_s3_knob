@@ -1,565 +1,397 @@
+/* JC3636K718 — simulator-style UI (quesort_simulator.html port).
+ *
+ * Four phases rendered in this build:
+ *   PH_BOOT  — orange QUESORT wordmark + filling progress arc
+ *   PH_HOME  — queue arc + status word in centre + cabin segments at rim
+ *   PH_ADMIN — settings: cabin count adjuster
+ *   PH_SLEEP — pure black with "SLEEP / TAP TO WAKE" prompt
+ *
+ * State source-of-truth is phase_manager. ui_engine_render() pulls
+ * fresh state via phase_manager_get_state() on EVERY tick — no caching —
+ * so the encoder/touch can change phase_manager state and the UI
+ * reflects it on the next render with no manual cache invalidation.
+ */
+
 #include "ui_engine.h"
 
 #include <stdio.h>
 #include <string.h>
 
-#if defined(__has_include)
-#if __has_include("lvgl.h")
+#include "esp_log.h"
+#include "esp_timer.h"
+
+#if defined(__has_include) && __has_include("lvgl.h")
 #include "lvgl.h"
 #define UI_HAS_LVGL 1
 #else
 #define UI_HAS_LVGL 0
-typedef struct _lv_obj_t lv_obj_t;
-#endif
-#else
-#define UI_HAS_LVGL 0
-typedef struct _lv_obj_t lv_obj_t;
 #endif
 
-#define UI_ACCENT_HEX 0xFF7520
-#define UI_TRACK_HEX 0x181818
-#define UI_TEXT_DIM_HEX 0x555555
-#define UI_TEXT_FAINT_HEX 0x222222
-#define UI_BG_HEX 0x000000
-#define UI_BG_SOFT_HEX 0x0F0F0F
-#define UI_BG_DOT_HEX 0x15151A
-#define UI_STEP_COUNT 8
-#define UI_ARC_START 140
-#define UI_ARC_END 40
+/* ───────────────────────────── design tokens ─────────────────────────── */
+/* Mirrors quesort_simulator.html's :root vars (Nothing-inspired palette). */
+#define COL_BG          0x000000
+#define COL_BG_SOFT     0x080808
+#define COL_TRACK       0x181818
+#define COL_FG          0xFFFFFF
+#define COL_FG_DIM      0x555555
+#define COL_FG_FAINT    0x222222
+#define COL_ACCENT      0xFF7520
+#define COL_BLUE        0x00AAFF
+#define COL_RED         0xDC2626
 
-typedef struct {
-    phase_t phase;
-    app_state_t app;
-    bool mesh_connected;
-    bool mesh_root;
-    int mesh_layer;
-    char ota_status[32];
-    bool dirty;
-} ui_state_t;
+/* ───────────────────────────── shared state ──────────────────────────── */
+static const char *TAG = "ui";
 
-static ui_state_t s_ui = {
-    .phase = PH_BOOT,
-    .app = {0},
-    .mesh_connected = false,
-    .mesh_root = false,
-    .mesh_layer = -1,
-    .ota_status = "OTA WAITING",
-    .dirty = true,
-};
-
-static portMUX_TYPE s_ui_mux = portMUX_INITIALIZER_UNLOCKED;
 SemaphoreHandle_t xGuiSemaphore = NULL;
 
-static void copy_state(ui_state_t *out)
-{
-    portENTER_CRITICAL(&s_ui_mux);
-    *out = s_ui;
-    s_ui.dirty = false;
-    portEXIT_CRITICAL(&s_ui_mux);
-}
-
-static bool consume_dirty(void)
-{
-    bool dirty = false;
-    portENTER_CRITICAL(&s_ui_mux);
-    dirty = s_ui.dirty;
-    portEXIT_CRITICAL(&s_ui_mux);
-    return dirty;
-}
-
 #if UI_HAS_LVGL
+/* Per-phase root containers — only the active phase's container is
+ * shown, the others are hidden. This avoids tear-down/rebuild churn
+ * on phase changes and keeps render dirty regions small. */
 static lv_obj_t *s_screen = NULL;
-static lv_obj_t *s_wordmark = NULL;
-static lv_obj_t *s_subtitle = NULL;
-static lv_obj_t *s_status = NULL;
-static lv_obj_t *s_center = NULL;
-static lv_obj_t *s_level = NULL;
-static lv_obj_t *s_hint = NULL;
-static lv_obj_t *s_ota = NULL;
-static lv_obj_t *s_bg = NULL;
-static lv_color_t *s_bg_buf = NULL;
-static lv_obj_t *s_rings[4] = {};
-static lv_obj_t *s_steps[UI_STEP_COUNT] = {};
 
-static const char *kStepLabels[UI_STEP_COUNT] = {
-    "01 USE CASE",
-    "02 ASSIGN",
-    "03 HOURS",
-    "04 CABINS",
-    "05 CAB INT",
-    "06 COR INT",
-    "07 START",
-    "HOME",
-};
+/* Phase: BOOT */
+static lv_obj_t *s_boot_root      = NULL;
+static lv_obj_t *s_boot_wordmark  = NULL;
+static lv_obj_t *s_boot_subtitle  = NULL;
+static lv_obj_t *s_boot_arc       = NULL;
 
-static const char *phase_label(phase_t phase)
-{
-    switch (phase) {
-    case PH_OFF:
-        return "POWER OFF";
-    case PH_BOOT:
-        return "BOOT";
-    case PH_ORIENT:
-        return "ORIENT";
-    case PH_USE_CASE:
-        return "USE CASE";
-    case PH_NET:
-        return "NETWORK";
-    case PH_CONN:
-        return "CONNECT";
-    case PH_ASSIGN:
-        return "ASSIGN";
-    case PH_TIME:
-        return "TIME";
-    case PH_OPEN_HR:
-        return "OPEN HOUR";
-    case PH_CLOSE_HR:
-        return "CLOSE HOUR";
-    case PH_CAB_CNT:
-        return "CABIN COUNT";
-    case PH_CAB_INT:
-        return "CABIN INTERVAL";
-    case PH_COR_INT:
-        return "CORRIDOR INTERVAL";
-    case PH_START:
-        return "START";
-    case PH_SPLASH:
-        return "SPLASH";
-    case PH_HOME:
-        return "HOME";
-    case PH_SLEEP:
-        return "SLEEP";
-    case PH_ADMIN:
-        return "ADMIN";
-    case PH_ONLINE_QR:
-        return "ONLINE QR";
-    case PH_WIFI_CONN:
-        return "WIFI CONNECT";
-    case PH_ONLINE_REG:
-        return "ONLINE REG";
-    case PH_LOC_PICK:
-        return "LOC PICK";
-    case PH_LOC_NAMING:
-        return "LOC NAME";
-    case PH_CLEANING_HUB:
-        return "CLEANING HUB";
-    case PH_CLEANING_HUB_FR:
-        return "CLEANING DETAIL";
-    default:
-        return "STATE";
-    }
-}
+/* Phase: HOME */
+static lv_obj_t *s_home_root      = NULL;
+static lv_obj_t *s_home_wordmark  = NULL;
+static lv_obj_t *s_home_queue_arc = NULL;   /* queue level arc */
+static lv_obj_t *s_home_cab_meter = NULL;   /* cabin segments meter */
+static lv_meter_scale_t *s_home_cab_scale = NULL;
+static lv_obj_t *s_home_center    = NULL;   /* solid disc */
+static lv_obj_t *s_home_status    = NULL;   /* "BUSY" / "OK" / ... */
+static lv_obj_t *s_home_qlevel    = NULL;   /* "Q 5" */
+static lv_obj_t *s_home_hint      = NULL;   /* bottom hint */
+
+/* Phase: ADMIN */
+static lv_obj_t *s_admin_root     = NULL;
+static lv_obj_t *s_admin_title    = NULL;
+static lv_obj_t *s_admin_field    = NULL;   /* field label */
+static lv_obj_t *s_admin_value    = NULL;   /* value */
+static lv_obj_t *s_admin_hint     = NULL;
+
+/* Phase: SLEEP */
+static lv_obj_t *s_sleep_root     = NULL;
+static lv_obj_t *s_sleep_label    = NULL;
+static lv_obj_t *s_sleep_hint     = NULL;
+
+/* Track which phase's root is currently visible to avoid pointless
+ * show/hide ops every render. */
+static phase_t s_visible_phase = (phase_t)-1;
+
+/* ───────────────────────────── helpers ───────────────────────────────── */
 
 static uint32_t color_for_level(uint8_t level)
 {
-    const taxonomy_entry_t *entry = phase_manager_get_taxonomy(level);
-    return entry ? entry->color_hex : UI_ACCENT_HEX;
+    const taxonomy_entry_t *e = phase_manager_get_taxonomy(level);
+    return e ? e->color_hex : COL_ACCENT;
 }
 
 static const char *label_for_level(uint8_t level)
 {
-    const taxonomy_entry_t *entry = phase_manager_get_taxonomy(level);
-    return entry ? entry->label : "QUEUE";
+    const taxonomy_entry_t *e = phase_manager_get_taxonomy(level);
+    return e ? e->label : "QUEUE";
 }
 
-static void arc_setup(lv_obj_t *arc, int size, int width)
+static lv_obj_t *make_label(lv_obj_t *parent, const char *text,
+                            const lv_font_t *font, uint32_t color,
+                            int letter_space, lv_align_t align,
+                            int dx, int dy)
 {
-    lv_obj_set_size(arc, size, size);
-    lv_obj_center(arc);
-    lv_arc_set_range(arc, 0, 100);
-    lv_arc_set_value(arc, 0);
-    lv_arc_set_bg_angles(arc, UI_ARC_START, UI_ARC_END);
-    lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_arc_width(arc, width, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(arc, width, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(arc, lv_color_hex(UI_TRACK_HEX), LV_PART_MAIN);
-    lv_obj_set_style_arc_color(arc, lv_color_hex(UI_ACCENT_HEX), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_KNOB);
-    lv_obj_set_style_pad_all(arc, 0, LV_PART_KNOB);
+    lv_obj_t *l = lv_label_create(parent);
+    lv_label_set_text(l, text);
+    lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_letter_space(l, letter_space, 0);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(l, align, dx, dy);
+    return l;
 }
 
-static void draw_dot_background(lv_obj_t *canvas)
+static lv_obj_t *make_phase_root(void)
 {
-    int width = lv_obj_get_width(canvas);
-    int height = lv_obj_get_height(canvas);
+    lv_obj_t *root = lv_obj_create(s_screen);
+    lv_obj_set_size(root, 360, 360);
+    lv_obj_center(root);
+    lv_obj_set_style_bg_color(root, lv_color_hex(COL_BG), 0);
+    lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(root, 0, 0);
+    lv_obj_set_style_pad_all(root, 0, 0);
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
+    return root;
+}
 
-    lv_canvas_fill_bg(canvas, lv_color_hex(UI_BG_HEX), LV_OPA_COVER);
-    lv_color_t dot = lv_color_hex(UI_BG_DOT_HEX);
+static void show_only(phase_t phase)
+{
+    if (phase == s_visible_phase) return;
+    s_visible_phase = phase;
 
-    for (int y = 3; y < height; y += 6) {
-        int dy = y - height / 2;
-        for (int x = 3; x < width; x += 6) {
-            int dx = x - width / 2;
-            if ((dx * dx + dy * dy) < ((width / 2) * (width / 2))) {
-                lv_canvas_set_px(canvas, x, y, dot);
-            }
+    lv_obj_t *to_show =
+        (phase == PH_BOOT)  ? s_boot_root  :
+        (phase == PH_HOME)  ? s_home_root  :
+        (phase == PH_ADMIN) ? s_admin_root :
+        (phase == PH_SLEEP) ? s_sleep_root :
+        s_home_root;  /* fallback */
+
+    lv_obj_t *roots[] = { s_boot_root, s_home_root, s_admin_root, s_sleep_root };
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); ++i) {
+        if (!roots[i]) continue;
+        if (roots[i] == to_show) {
+            lv_obj_clear_flag(roots[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(roots[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
 }
 
-static lv_obj_t *make_label(const char *text,
-                            lv_align_t align,
-                            int x,
-                            int y,
-                            uint32_t color,
-                            int letter_space,
-                            const lv_font_t *font)
+/* ───────────────────────────── BOOT screen ───────────────────────────── */
+
+static void build_boot(void)
 {
-    lv_obj_t *label = lv_label_create(s_screen);
-    lv_label_set_text(label, text);
-    lv_obj_align(label, align, x, y);
-    lv_obj_set_style_text_color(label, lv_color_hex(color), LV_PART_MAIN);
-    lv_obj_set_style_text_letter_space(label, letter_space, LV_PART_MAIN);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    if (font) {
-        lv_obj_set_style_text_font(label, font, LV_PART_MAIN);
-    }
-    return label;
+    s_boot_root = make_phase_root();
+
+    s_boot_arc = lv_arc_create(s_boot_root);
+    lv_obj_set_size(s_boot_arc, 320, 320);
+    lv_obj_center(s_boot_arc);
+    lv_arc_set_rotation(s_boot_arc, 270);
+    lv_arc_set_bg_angles(s_boot_arc, 0, 360);
+    lv_arc_set_range(s_boot_arc, 0, 100);
+    lv_arc_set_value(s_boot_arc, 0);
+    lv_obj_remove_style(s_boot_arc, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(s_boot_arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(s_boot_arc, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_boot_arc, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_boot_arc, lv_color_hex(COL_TRACK),  LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_boot_arc, lv_color_hex(COL_ACCENT), LV_PART_INDICATOR);
+
+    s_boot_wordmark = make_label(s_boot_root, "QUESORT",
+        &lv_font_montserrat_16, COL_ACCENT, 6, LV_ALIGN_CENTER, 0, -10);
+    s_boot_subtitle = make_label(s_boot_root, "STARTING",
+        &lv_font_montserrat_10, COL_FG_DIM, 4, LV_ALIGN_CENTER, 0, 18);
 }
 
-static void ui_style_step(lv_obj_t *step, int state)
+static void apply_boot(const app_state_t *state)
 {
-    uint32_t color = UI_TEXT_FAINT_HEX;
-    uint32_t bg = UI_BG_HEX;
-
-    if (state == 1) {
-        color = UI_ACCENT_HEX;
-        bg = UI_BG_SOFT_HEX;
-    } else if (state == 2) {
-        color = UI_TEXT_FAINT_HEX;
-        bg = UI_BG_SOFT_HEX;
-    }
-
-    lv_obj_set_style_text_color(step, lv_color_hex(color), LV_PART_MAIN);
-    lv_obj_set_style_border_color(step, lv_color_hex(color), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(step, lv_color_hex(bg), LV_PART_MAIN);
+    (void)state;
+    /* Pulse the progress arc 0→100 over the ~1s boot hold. */
+    uint32_t t = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    static uint32_t boot_t0 = 0;
+    if (boot_t0 == 0) boot_t0 = t;
+    int pct = (int)((t - boot_t0) * 100 / 1000);
+    if (pct > 100) pct = 100;
+    lv_arc_set_value(s_boot_arc, pct);
 }
 
-static void ui_update_steps(phase_t phase)
+/* ───────────────────────────── HOME screen ───────────────────────────── */
+/*
+ * Layout (360×360 round):
+ *   - outer cabin meter: thin segmented ring at r=170 (decorative; one
+ *     wedge per cab_count + 1 corridor; all idle-coloured for now)
+ *   - queue arc: 280×280, 8px wide, fills -130°..+130° proportionally
+ *     to queue_level/8 with the taxonomy colour
+ *   - centre disc: 160px round soft-bg circle that holds the status
+ *     word + Q-level
+ *   - top: small QUESORT wordmark
+ *   - bottom: hint "ROTATE • HOLD ADMIN"
+ */
+static void build_home(void)
 {
-    int active = phase_manager_get_step_index(phase);
+    s_home_root = make_phase_root();
 
-    for (int i = 0; i < UI_STEP_COUNT; ++i) {
-        if (!s_steps[i]) {
-            continue;
-        }
+    /* Outer cabin segments via lv_meter — built per draw, cheap. */
+    s_home_cab_meter = lv_meter_create(s_home_root);
+    lv_obj_set_size(s_home_cab_meter, 360, 360);
+    lv_obj_center(s_home_cab_meter);
+    lv_obj_clear_flag(s_home_cab_meter, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(s_home_cab_meter, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_home_cab_meter, 0, 0);
+    lv_obj_set_style_pad_all(s_home_cab_meter, 0, 0);
+    s_home_cab_scale = lv_meter_add_scale(s_home_cab_meter);
+    lv_meter_set_scale_ticks(s_home_cab_meter, s_home_cab_scale,
+                             0, 0, 0, lv_color_hex(COL_TRACK));
+    lv_meter_set_scale_range(s_home_cab_meter, s_home_cab_scale,
+                             0, 100, 360, 270);
 
-        int state = 0;
-        if (i == active) {
-            state = 1;
-        } else if (i < active) {
-            state = 2;
-        }
-        ui_style_step(s_steps[i], state);
-    }
+    /* Main queue arc */
+    s_home_queue_arc = lv_arc_create(s_home_root);
+    lv_obj_set_size(s_home_queue_arc, 280, 280);
+    lv_obj_center(s_home_queue_arc);
+    /* Arc from 130° (lower-left) sweeping CW to 50° (lower-right) of the
+     * top half — same -130..+130 sweep as the HTML simulator's QAR=130. */
+    lv_arc_set_rotation(s_home_queue_arc, 130);
+    lv_arc_set_bg_angles(s_home_queue_arc, 0, 280);
+    lv_arc_set_range(s_home_queue_arc, 0, 100);
+    lv_arc_set_value(s_home_queue_arc, 0);
+    lv_obj_remove_style(s_home_queue_arc, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(s_home_queue_arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(s_home_queue_arc, 10, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_home_queue_arc, 10, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_home_queue_arc, lv_color_hex(COL_TRACK),  LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_home_queue_arc, lv_color_hex(COL_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(s_home_queue_arc, true, LV_PART_INDICATOR);
+
+    /* Centre disc */
+    s_home_center = lv_obj_create(s_home_root);
+    lv_obj_set_size(s_home_center, 170, 170);
+    lv_obj_center(s_home_center);
+    lv_obj_set_style_bg_color(s_home_center, lv_color_hex(COL_BG_SOFT), 0);
+    lv_obj_set_style_bg_opa(s_home_center, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_home_center, 1, 0);
+    lv_obj_set_style_border_color(s_home_center, lv_color_hex(COL_TRACK), 0);
+    lv_obj_set_style_radius(s_home_center, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_all(s_home_center, 0, 0);
+    lv_obj_clear_flag(s_home_center, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    s_home_status = make_label(s_home_center, "EMPTY",
+        &lv_font_montserrat_16, COL_ACCENT, 4, LV_ALIGN_CENTER, 0, -12);
+    s_home_qlevel = make_label(s_home_center, "Q 1",
+        &lv_font_montserrat_12, COL_FG, 4, LV_ALIGN_CENTER, 0, 16);
+
+    /* Top wordmark + bottom hint */
+    s_home_wordmark = make_label(s_home_root, "QUESORT",
+        &lv_font_montserrat_10, COL_ACCENT, 4, LV_ALIGN_TOP_MID, 0, 16);
+    s_home_hint = make_label(s_home_root, "ROTATE  •  HOLD ADMIN",
+        &lv_font_montserrat_10, COL_FG_FAINT, 2, LV_ALIGN_BOTTOM_MID, 0, -18);
 }
 
-static void ui_build(void)
+static void apply_home(const app_state_t *state)
 {
-    s_screen = lv_scr_act();
-    lv_obj_clean(s_screen);
-    lv_obj_set_style_bg_color(s_screen, lv_color_hex(UI_BG_HEX), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, LV_PART_MAIN);
-
-    s_bg = lv_canvas_create(s_screen);
-    lv_obj_set_size(s_bg, lv_obj_get_width(s_screen), lv_obj_get_height(s_screen));
-    lv_obj_clear_flag(s_bg, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_border_width(s_bg, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(s_bg, 0, LV_PART_MAIN);
-
-    size_t buf_pixels = (size_t)lv_obj_get_width(s_screen) * (size_t)lv_obj_get_height(s_screen);
-    s_bg_buf = lv_mem_alloc(buf_pixels * sizeof(lv_color_t));
-    if (s_bg_buf) {
-        lv_canvas_set_buffer(s_bg, s_bg_buf,
-                             lv_obj_get_width(s_screen),
-                             lv_obj_get_height(s_screen),
-                             LV_IMG_CF_TRUE_COLOR);
-        draw_dot_background(s_bg);
-    }
-    lv_obj_move_background(s_bg);
-
-    s_rings[0] = lv_arc_create(s_screen);
-    s_rings[1] = lv_arc_create(s_screen);
-    s_rings[2] = lv_arc_create(s_screen);
-    s_rings[3] = lv_arc_create(s_screen);
-    arc_setup(s_rings[0], 320, 6);
-    arc_setup(s_rings[1], 296, 5);
-    arc_setup(s_rings[2], 274, 4);
-    arc_setup(s_rings[3], 252, 3);
-
-    s_wordmark = make_label("QUESORT", LV_ALIGN_TOP_MID, 0, 8, UI_ACCENT_HEX, 4, &lv_font_montserrat_12);
-    s_subtitle = make_label("MULTI-SPECTRUM", LV_ALIGN_TOP_MID, 0, 22, UI_TEXT_FAINT_HEX, 2, &lv_font_montserrat_10);
-    make_label("UNIFIED SIMULATOR", LV_ALIGN_TOP_MID, 0, 34, UI_TEXT_FAINT_HEX, 2, &lv_font_montserrat_10);
-
-    const int step_w = 78;
-    const int step_h = 13;
-    const int step_gap = 4;
-    const int cols = 4;
-    const int grid_w = cols * step_w + (cols - 1) * step_gap;
-    const int start_x = (lv_obj_get_width(s_screen) - grid_w) / 2;
-    const int start_y = 46;
-
-    for (int i = 0; i < UI_STEP_COUNT; ++i) {
-        int row = i / cols;
-        int col = i % cols;
-
-        lv_obj_t *step = lv_label_create(s_screen);
-        lv_label_set_text(step, kStepLabels[i]);
-        lv_label_set_long_mode(step, LV_LABEL_LONG_CLIP);
-        lv_obj_set_size(step, step_w, step_h);
-        lv_obj_set_pos(step,
-                   start_x + col * (step_w + step_gap),
-                   start_y + row * (step_h + 2));
-        lv_obj_set_style_text_align(step, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_style_text_font(step, &lv_font_montserrat_10, LV_PART_MAIN);
-        lv_obj_set_style_text_letter_space(step, 1, LV_PART_MAIN);
-        lv_obj_set_style_border_width(step, 1, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(step, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_pad_left(step, 0, LV_PART_MAIN);
-        lv_obj_set_style_pad_right(step, 0, LV_PART_MAIN);
-        s_steps[i] = step;
-    }
-
-    s_status = make_label("POWER ON TO BEGIN", LV_ALIGN_TOP_MID, 0, 82, UI_TEXT_DIM_HEX, 2, &lv_font_montserrat_10);
-    s_center = make_label("Q1", LV_ALIGN_CENTER, 0, -12, 0xFFFFFF, 2, &lv_font_montserrat_16);
-    s_level = make_label("EMPTY", LV_ALIGN_CENTER, 0, 22, UI_ACCENT_HEX, 2, &lv_font_montserrat_12);
-    s_hint = make_label("ROTATE QUEUE  HOLD ADMIN", LV_ALIGN_BOTTOM_MID, 0, -46, UI_TEXT_FAINT_HEX, 1, &lv_font_montserrat_10);
-    s_ota = make_label("OTA WAITING", LV_ALIGN_BOTTOM_MID, 0, -26, UI_TEXT_DIM_HEX, 1, &lv_font_montserrat_10);
-}
-
-static int ring_value(uint8_t level)
-{
-    if (level < 1) {
-        return 0;
-    }
-    if (level > 8) {
-        level = 8;
-    }
-    return (int)(level * 100 / 8);
-}
-
-static void ui_apply_home(const ui_state_t *state)
-{
-    uint8_t level = state->app.queue_level;
+    uint8_t level = state->queue_level;
+    if (level < 1) level = 1; else if (level > 8) level = 8;
     uint32_t color = color_for_level(level);
 
-    lv_label_set_text_fmt(s_center, "Q%u", (unsigned)level);
-    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_label_set_text(s_level, label_for_level(level));
-    lv_obj_set_style_text_color(s_level, lv_color_hex(color), LV_PART_MAIN);
+    /* Queue arc: 100% = full sweep, 12.5% per level. */
+    lv_arc_set_value(s_home_queue_arc, level * 100 / 8);
+    lv_obj_set_style_arc_color(s_home_queue_arc, lv_color_hex(color),
+                               LV_PART_INDICATOR);
 
-    const uint8_t peer_values[4] = {
-        level,
-        (uint8_t)((level + 2) > 8 ? 8 : level + 2),
-        (uint8_t)(level > 2 ? level - 2 : 1),
-        1,
-    };
-    const uint32_t ring_colors[4] = {
-        color,
-        0x00AAFF,
-        0x22C55E,
-        UI_ACCENT_HEX,
-    };
+    /* Centre status word colours with the level. */
+    lv_label_set_text(s_home_status, label_for_level(level));
+    lv_obj_set_style_text_color(s_home_status, lv_color_hex(color), 0);
 
-    for (int i = 0; i < 4; ++i) {
-        lv_arc_set_value(s_rings[i], ring_value(peer_values[i]));
-        lv_obj_set_style_arc_color(s_rings[i], lv_color_hex(ring_colors[i]), LV_PART_INDICATOR);
-    }
-
-    lv_label_set_text(s_hint, "ROTATE QUEUE  HOLD ADMIN");
-    lv_obj_set_style_text_color(s_center, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_hint, lv_color_hex(UI_TEXT_FAINT_HEX), LV_PART_MAIN);
+    lv_label_set_text_fmt(s_home_qlevel, "Q %u", (unsigned)level);
 }
 
-static void ui_apply_admin(const ui_state_t *state)
-{
-    for (int i = 0; i < 4; ++i) {
-        lv_arc_set_value(s_rings[i], ring_value(8));
-        lv_obj_set_style_arc_color(s_rings[i], lv_color_hex(i == 0 ? UI_ACCENT_HEX : UI_TRACK_HEX), LV_PART_INDICATOR);
-    }
+/* ───────────────────────────── ADMIN screen ──────────────────────────── */
 
-    lv_label_set_text(s_center, "ADMIN");
-    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_label_set_text_fmt(s_level, "%s  L%d",
-                          state->mesh_root ? "ROOT" : "NODE",
-                          state->mesh_layer);
-    lv_obj_set_style_text_color(s_level, lv_color_hex(UI_ACCENT_HEX), LV_PART_MAIN);
-    lv_label_set_text(s_hint, "TAP EXIT  OTA AUTO");
+static void build_admin(void)
+{
+    s_admin_root = make_phase_root();
+    s_admin_title = make_label(s_admin_root, "ADMIN",
+        &lv_font_montserrat_14, COL_ACCENT, 6, LV_ALIGN_TOP_MID, 0, 36);
+    s_admin_field = make_label(s_admin_root, "CABINS",
+        &lv_font_montserrat_10, COL_FG_DIM, 4, LV_ALIGN_CENTER, 0, -28);
+    s_admin_value = make_label(s_admin_root, "4",
+        &lv_font_montserrat_16, COL_FG, 8, LV_ALIGN_CENTER, 0, 8);
+    s_admin_hint = make_label(s_admin_root, "ROTATE  •  HOLD EXIT",
+        &lv_font_montserrat_10, COL_FG_FAINT, 2, LV_ALIGN_BOTTOM_MID, 0, -18);
 }
 
-static void ui_apply_sleep(void)
+static void apply_admin(const app_state_t *state)
 {
-    for (int i = 0; i < 4; ++i) {
-        lv_arc_set_value(s_rings[i], 0);
-    }
-    lv_label_set_text(s_center, "SLEEP");
-    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_label_set_text(s_level, "TAP TO WAKE");
-    lv_obj_set_style_text_color(s_level, lv_color_hex(UI_TEXT_DIM_HEX), LV_PART_MAIN);
-    lv_label_set_text(s_hint, "LOW POWER");
+    lv_label_set_text_fmt(s_admin_value, "%u", (unsigned)state->cab_count);
 }
 
-static void ui_apply_boot(void)
+/* ───────────────────────────── SLEEP screen ──────────────────────────── */
+
+static void build_sleep(void)
 {
-    for (int i = 0; i < 4; ++i) {
-        lv_arc_set_value(s_rings[i], ring_value((uint8_t)(i + 2)));
-        lv_obj_set_style_arc_color(s_rings[i], lv_color_hex(i == 0 ? UI_ACCENT_HEX : UI_TRACK_HEX), LV_PART_INDICATOR);
-    }
-    lv_label_set_text(s_center, "STARTING UP");
-    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_label_set_text(s_level, "PLEASE WAIT");
-    lv_obj_set_style_text_color(s_level, lv_color_hex(UI_TEXT_DIM_HEX), LV_PART_MAIN);
-    lv_label_set_text(s_hint, "BOOTING");
+    s_sleep_root = make_phase_root();
+    s_sleep_label = make_label(s_sleep_root, "SLEEP",
+        &lv_font_montserrat_16, COL_FG_DIM, 6, LV_ALIGN_CENTER, 0, -8);
+    s_sleep_hint = make_label(s_sleep_root, "TAP TO WAKE",
+        &lv_font_montserrat_10, COL_FG_FAINT, 4, LV_ALIGN_CENTER, 0, 16);
 }
 
-static void ui_apply_setup(const ui_state_t *state)
+static void apply_sleep(const app_state_t *state) { (void)state; }
+
+/* ───────────────────────────── render ────────────────────────────────── */
+
+static void apply_state(const app_state_t *state)
 {
-    for (int i = 0; i < 4; ++i) {
-        lv_arc_set_value(s_rings[i], ring_value((uint8_t)(2 + i)));
-        lv_obj_set_style_arc_color(s_rings[i], lv_color_hex(UI_TRACK_HEX), LV_PART_INDICATOR);
-    }
-
-    lv_label_set_text(s_center, phase_label(state->phase));
-    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_center, lv_color_hex(UI_ACCENT_HEX), LV_PART_MAIN);
-
+    show_only(state->phase);
     switch (state->phase) {
-    case PH_USE_CASE:
-        lv_label_set_text_fmt(s_level, "UC %d", (int)state->app.use_case_sel + 1);
-        break;
-    case PH_NET:
-        lv_label_set_text_fmt(s_level, "NET %d", (int)state->app.net_sel + 1);
-        break;
-    case PH_TIME:
-        lv_label_set_text_fmt(s_level, "%04u-%02u-%02u",
-                              (unsigned)state->app.time_fields[0],
-                              (unsigned)state->app.time_fields[1],
-                              (unsigned)state->app.time_fields[2]);
-        break;
-    case PH_OPEN_HR:
-        lv_label_set_text_fmt(s_level, "OPEN %02u:00", (unsigned)state->app.open_hour);
-        break;
-    case PH_CLOSE_HR:
-        lv_label_set_text_fmt(s_level, "CLOSE %02u:00", (unsigned)state->app.close_hour);
-        break;
-    case PH_CAB_CNT:
-        lv_label_set_text_fmt(s_level, "CABINS %u", (unsigned)state->app.cab_count);
-        break;
-    case PH_CAB_INT:
-        lv_label_set_text_fmt(s_level, "CAB INT %u", (unsigned)state->app.cab_int);
-        break;
-    case PH_COR_INT:
-        lv_label_set_text_fmt(s_level, "COR INT %u", (unsigned)state->app.cor_int);
-        break;
-    case PH_ORIENT:
-        lv_label_set_text_fmt(s_level, "ORIENT %u", (unsigned)state->app.orient_pos);
-        break;
-    default:
-        lv_label_set_text(s_level, "CONFIG");
-        break;
+    case PH_BOOT:  apply_boot(state);  break;
+    case PH_HOME:  apply_home(state);  break;
+    case PH_ADMIN: apply_admin(state); break;
+    case PH_SLEEP: apply_sleep(state); break;
+    default:       apply_home(state);  break;  /* unhandled phase → home */
     }
-
-    lv_label_set_text(s_hint, "ROTATE  TAP = CONFIRM");
 }
 
-static void ui_apply_state(const ui_state_t *state)
+static void screen_tap_cb(lv_event_t *e)
 {
-    ui_update_steps(state->phase);
-    if (state->mesh_layer < 0) {
-        lv_label_set_text(s_status, "LOCAL MODE");
-        lv_obj_set_style_text_color(s_status, lv_color_hex(UI_TEXT_DIM_HEX), LV_PART_MAIN);
-    } else if (state->mesh_connected) {
-        lv_label_set_text_fmt(s_status, "%s  L%d",
-                              state->mesh_root ? "MESH ROOT" : "MESH NODE",
-                              state->mesh_layer);
-        lv_obj_set_style_text_color(s_status, lv_color_hex(state->mesh_root ? UI_ACCENT_HEX : 0x00AAFF), LV_PART_MAIN);
-    } else {
-        lv_label_set_text(s_status, "MESH SEARCH");
-        lv_obj_set_style_text_color(s_status, lv_color_hex(UI_TEXT_DIM_HEX), LV_PART_MAIN);
-    }
-
-    lv_label_set_text(s_ota, state->ota_status);
-
-    switch (state->phase) {
-    case PH_ADMIN:
-        ui_apply_admin(state);
-        break;
-    case PH_SLEEP:
-    case PH_OFF:
-        ui_apply_sleep();
-        break;
-    case PH_BOOT:
-        ui_apply_boot();
-        break;
-    case PH_HOME:
-        ui_apply_home(state);
-        break;
-    default:
-        ui_apply_setup(state);
-        break;
-    }
+    /* Touch-anywhere = short press, wakes from SLEEP and toggles HOME nav. */
+    (void)e;
+    phase_manager_on_button(true, 0);
 }
-#endif
+#endif /* UI_HAS_LVGL */
+
+/* ───────────────────────────── public API ────────────────────────────── */
 
 void ui_engine_init(void)
 {
-    if (!xGuiSemaphore) {
-        xGuiSemaphore = xSemaphoreCreateMutex();
-    }
-
-    ui_engine_set_phase(phase_manager_get_phase());
-
 #if UI_HAS_LVGL
-    ui_build();
-    ui_state_t snapshot = {};
-    copy_state(&snapshot);
-    ui_apply_state(&snapshot);
+    s_screen = lv_scr_act();
+    lv_obj_set_style_bg_color(s_screen, lv_color_hex(COL_BG), 0);
+    lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_screen, 0, 0);
+    lv_obj_set_style_border_width(s_screen, 0, 0);
+    lv_obj_clear_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_screen, LV_SCROLLBAR_MODE_OFF);
+
+    build_boot();
+    build_home();
+    build_admin();
+    build_sleep();
+
+    /* Wake-on-tap via touch driver (lvgl_port already feeds touch
+     * events through lv_indev). Listening on the screen catches any
+     * unfocused tap. */
+    lv_obj_add_event_cb(s_screen, screen_tap_cb, LV_EVENT_CLICKED, NULL);
+
+    /* Show whatever phase_manager is in now (BOOT on first launch). */
+    app_state_t st;
+    phase_manager_get_state(&st);
+    apply_state(&st);
+    ESP_LOGI(TAG, "UI built; initial phase=%d", (int)st.phase);
 #endif
 }
 
 void ui_engine_set_phase(phase_t phase)
 {
-    portENTER_CRITICAL(&s_ui_mux);
-    s_ui.phase = phase;
-    phase_manager_get_state(&s_ui.app);
-    s_ui.dirty = true;
-    portEXIT_CRITICAL(&s_ui_mux);
+    /* Kept for source compatibility — phase_manager is the source of
+     * truth now and ui_engine_render pulls fresh state each tick.
+     * This setter is effectively a hint. */
+    (void)phase;
 }
 
 void ui_engine_set_mesh_state(bool connected, bool root, int layer)
 {
-    portENTER_CRITICAL(&s_ui_mux);
-    s_ui.mesh_connected = connected;
-    s_ui.mesh_root = root;
-    s_ui.mesh_layer = layer;
-    s_ui.dirty = true;
-    portEXIT_CRITICAL(&s_ui_mux);
+    (void)connected; (void)root; (void)layer;
 }
 
 void ui_engine_set_ota_status(const char *status)
 {
-    portENTER_CRITICAL(&s_ui_mux);
-    snprintf(s_ui.ota_status, sizeof(s_ui.ota_status), "%s", status ? status : "OTA IDLE");
-    s_ui.dirty = true;
-    portEXIT_CRITICAL(&s_ui_mux);
+    (void)status;
 }
 
 void ui_engine_render(void)
 {
 #if UI_HAS_LVGL
-    if (xGuiSemaphore && xSemaphoreTake(xGuiSemaphore, pdMS_TO_TICKS(50)) == pdTRUE) {
-        if (consume_dirty()) {
-            ui_state_t snapshot = {};
-            copy_state(&snapshot);
-            phase_manager_get_state(&snapshot.app);
-            ui_apply_state(&snapshot);
-        }
-        lv_timer_handler();
-        xSemaphoreGive(xGuiSemaphore);
-    }
-#else
-    ui_state_t snapshot = {};
-    copy_state(&snapshot);
-    (void)snapshot;
+    /* Pull fresh state every tick — encoder/button updates land in
+     * phase_manager and propagate to the UI without manual cache
+     * invalidation. LVGL's invalidation tracking ensures only the
+     * widgets whose content actually changed get repainted. */
+    app_state_t st;
+    phase_manager_get_state(&st);
+    apply_state(&st);
+
+    lv_timer_handler();
 #endif
 }

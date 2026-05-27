@@ -6,7 +6,12 @@
 #include "esp_timer.h"
 
 #define LV_COLOR_DEPTH 16
-#define LV_COLOR_16_SWAP 0
+/* RGB565 MSB-first on the wire. The ST77916 (and most SPI panels) expect
+ * pixel bytes in big-endian order. With LV_COLOR_16_SWAP=0, LVGL stored
+ * pixels little-endian and every color came out swapped → produces the
+ * multi-colored horizontal stripe pattern. Setting to 1 pre-swaps so the
+ * draw buffer's RGB565 bytes already match what the panel reads. */
+#define LV_COLOR_16_SWAP 1
 
 #define LV_USE_PERF_MONITOR 0
 #define LV_USE_MEM_MONITOR 0
