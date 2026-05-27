@@ -42,6 +42,29 @@ static const char *kTag = "encoder";
  * channel makes during a detent on the FIRST channel. */
 #define DEBOUNCE_TICKS      2
 
+/* Mutual-interlock window: after either A or B fires, ignore further
+ * events from either channel for this long. Prevents the same physical
+ * detent from producing two emits when both channels race past the
+ * debounce gate (the "spun once, jumped two" failure). Tuned just
+ * above one quadrature half-cycle worth of poll time — long enough to
+ * eat the trailing channel's late rise, short enough that a fast spin
+ * still resolves each detent. */
+#define INTERLOCK_MS        15
+
+/* Rate limit on emitted detents. Raw detents accumulate into a small
+ * signed buffer; the poll task drains at most ONE ±1 per this interval.
+ * Effect: regardless of how fast the user spins, the queue arc grows
+ * at a fixed maximum rate (≈1000/EMIT_MIN_INTERVAL_MS detents/sec).
+ * After the user stops spinning, the buffer continues draining smoothly
+ * until empty. Combined with the 180 ms arc animation tween in
+ * ui_engine.c this gives a continuous "smooth follow" feel even on a
+ * frantic spin — never snappy, never laggy. */
+#define EMIT_MIN_INTERVAL_MS    60
+/* Cap on buffered pending detents so a deliberately absurd spin
+ * doesn't take 30 s to settle. ±18 detents = ±6 status levels at
+ * 3:1 damping — already more change than any real workflow needs. */
+#define PENDING_CAP             18
+
 /* Sensitivity damping is handled in phase_manager — see queue_sub_step.
  * The encoder driver emits one ±1 per raw detent so the UI can animate
  * the queue arc continuously while the discrete status level only
@@ -65,6 +88,12 @@ static uint8_t s_a_prev_level      = 1;
 static uint8_t s_b_prev_level      = 1;
 static uint8_t s_a_debounce_cnt    = 0;
 static uint8_t s_b_debounce_cnt    = 0;
+static int64_t s_interlock_until_us = 0;
+
+/* Rate-limiter state — pending detents buffered, drained at fixed
+ * cadence. See EMIT_MIN_INTERVAL_MS comment for behaviour rationale. */
+static int     s_pending_detents   = 0;
+static int64_t s_last_emit_us      = 0;
 
 
 /* Button tracking */
@@ -130,12 +159,48 @@ static void poll_encoder(void)
      * (turn right, queue grows); A rising → -1 (turn left, queue shrinks). */
     int da = process_channel(a, &s_a_prev_level, &s_a_debounce_cnt, -1);
     int db = process_channel(b, &s_b_prev_level, &s_b_debounce_cnt, +1);
-    int delta = da + db;
-    if (delta == 0) return;
 
-    ESP_LOGI(kTag, "rotate delta=%+d  A=%u B=%u  (da=%+d db=%+d)",
-             delta, (unsigned)a, (unsigned)b, da, db);
-    emit_delta(delta);
+    /* Mutual interlock: after either channel fires, suppress the OTHER
+     * channel for INTERLOCK_MS so the same physical detent can't be
+     * counted twice. A standard EC11 emits a rising edge on BOTH A and
+     * B per detent — the manufacturer's algorithm relies on debounce
+     * timing to filter the "fast" channel out, but on borderline
+     * rotation speeds both channels can sneak through and produce a
+     * spurious second event that feels like "spun once, jumped two."
+     * The interlock window enforces "first wins" per detent. */
+    int64_t now = esp_timer_get_time();
+    if (da != 0 && now < s_interlock_until_us) da = 0;
+    if (db != 0 && now < s_interlock_until_us) db = 0;
+    if (da != 0 || db != 0) {
+        s_interlock_until_us = now + (int64_t)INTERLOCK_MS * 1000;
+    }
+
+    int delta = da + db;
+    if (delta != 0) {
+        /* Buffer the raw detent. Cap magnitude so an absurd spin
+         * can't queue minutes of motion. Sign-flip a buffer that's
+         * pointing the wrong way isn't a special case — the cap
+         * applies symmetrically so reversing direction is immediate. */
+        s_pending_detents += delta;
+        if (s_pending_detents >  PENDING_CAP) s_pending_detents =  PENDING_CAP;
+        if (s_pending_detents < -PENDING_CAP) s_pending_detents = -PENDING_CAP;
+    }
+
+    /* Drain at most one queued detent per EMIT_MIN_INTERVAL_MS.
+     * Runs every poll regardless of whether THIS poll saw a raw
+     * detent — that's what lets the buffer keep draining smoothly
+     * after the user stops physically turning the knob. */
+    if (s_pending_detents != 0) {
+        int64_t now = esp_timer_get_time();
+        if ((now - s_last_emit_us) >= (int64_t)EMIT_MIN_INTERVAL_MS * 1000) {
+            s_last_emit_us = now;
+            int step = (s_pending_detents > 0) ? +1 : -1;
+            s_pending_detents -= step;
+            ESP_LOGI(kTag, "rotate emit=%+d  pending=%+d  (raw_da=%+d db=%+d)",
+                     step, s_pending_detents, da, db);
+            emit_delta(step);
+        }
+    }
 }
 
 static void poll_button(void)

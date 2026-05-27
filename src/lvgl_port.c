@@ -73,29 +73,66 @@ static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t 
     lv_disp_flush_ready(drv);
 }
 
-static void lvgl_touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
+/* Background touch poller — runs every 5 ms on the esp_timer task,
+ * far faster than LVGL's 30 ms indev poll. Latches the latest
+ * cst816 state into the cache below. The LVGL read_cb then just
+ * consumes the cache + applies a generous sticky window. This way
+ * even sub-30ms taps are caught: the 5 ms timer always sees them.
+ *
+ * Without this, quick taps land entirely between LVGL polls and
+ * are never registered — the long-standing "tap didn't dismiss"
+ * symptom. */
+static volatile bool     s_touch_latched_pressed = false;
+static volatile uint16_t s_touch_latched_x       = 0;
+static volatile uint16_t s_touch_latched_y       = 0;
+static volatile int64_t  s_touch_last_press_us   = 0;
+
+static void touch_poll_timer_cb(void *arg)
 {
-    (void)drv;
+    (void)arg;
     cst816_point_t pt = {};
     cst816_read(&pt);
+    if (pt.touched) {
+        s_touch_latched_pressed = true;
+        s_touch_latched_x       = pt.x;
+        s_touch_latched_y       = pt.y;
+        s_touch_last_press_us   = esp_timer_get_time();
+    } else {
+        s_touch_latched_pressed = false;
+    }
 
-    /* Log state transitions only — printing every poll would drown the
-     * console. Surfaces "is the I2C read returning a press?" which is
-     * the first link in the chain when taps don't reach the UI. */
-    static bool was_touched = false;
-    if (pt.touched != was_touched) {
-        was_touched = pt.touched;
+    /* Edge-log only for diagnostics. */
+    static bool prev = false;
+    if (pt.touched != prev) {
+        prev = pt.touched;
         ESP_LOGI(kTag, "touch %s @ (%u,%u)",
                  pt.touched ? "PRESS  " : "RELEASE",
                  (unsigned)pt.x, (unsigned)pt.y);
     }
+}
 
-    if (pt.touched) {
-        data->state = LV_INDEV_STATE_PRESSED;
-        data->point.x = pt.x;
-        data->point.y = pt.y;
+static void lvgl_touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
+{
+    (void)drv;
+
+    /* Generous 250 ms sticky window — ensures LVGL always sees a
+     * coherent PRESS→RELEASE pair for any touch the background
+     * poller caught, regardless of how long ago. */
+    const int64_t STICKY_US = 250 * 1000;
+    int64_t now = esp_timer_get_time();
+
+    if (s_touch_latched_pressed) {
+        data->state    = LV_INDEV_STATE_PRESSED;
+        data->point.x  = s_touch_latched_x;
+        data->point.y  = s_touch_latched_y;
+    } else if (s_touch_last_press_us != 0 &&
+               (now - s_touch_last_press_us) < STICKY_US) {
+        data->state    = LV_INDEV_STATE_PRESSED;
+        data->point.x  = s_touch_latched_x;
+        data->point.y  = s_touch_latched_y;
     } else {
-        data->state = LV_INDEV_STATE_RELEASED;
+        s_touch_last_press_us = 0;
+        data->state    = LV_INDEV_STATE_RELEASED;
     }
 }
 #endif
@@ -133,6 +170,22 @@ bool lvgl_port_init(const display_config_t *disp_cfg, const cst816_config_t *tou
 
     if (cst816_init(&s_touch_cfg) != ESP_OK) {
         ESP_LOGW(kTag, "touch init failed");
+    }
+
+    /* Background touch poll @ 5 ms — fills the latched cache that
+     * lvgl_touch_read_cb consumes. Decoupling cst816 polling from
+     * LVGL's 30 ms refresh tick is what makes quick taps reliable. */
+    const esp_timer_create_args_t touch_args = {
+        .callback = touch_poll_timer_cb,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "touch_poll",
+    };
+    esp_timer_handle_t touch_timer = NULL;
+    if (esp_timer_create(&touch_args, &touch_timer) == ESP_OK) {
+        esp_timer_start_periodic(touch_timer, 5000);  /* 5 ms */
+    } else {
+        ESP_LOGW(kTag, "touch poll timer create failed");
     }
 
     /* 40-row partial-mode draw buffer in INTERNAL DMA-capable SRAM —
@@ -196,6 +249,12 @@ bool lvgl_port_init(const display_config_t *disp_cfg, const cst816_config_t *tou
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb = lvgl_touch_read_cb;
+    /* 1500 ms long-press matches the encoder button's threshold, so
+     * the FR↔T type toggle feels the same whether triggered by
+     * holding the encoder or holding a finger on the screen.
+     * (LVGL's default is 400 ms which is too short to feel
+     * deliberate.) */
+    indev_drv.long_press_time = 1500;
     s_indev = lv_indev_drv_register(&indev_drv);
 #endif
 

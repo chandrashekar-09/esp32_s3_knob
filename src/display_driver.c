@@ -296,8 +296,15 @@ static void st77916_reset(void)
 static esp_err_t st77916_run_init(void)
 {
     /* MADCTL + COLMOD go first — Espressif convention; the manufacturer's
-     * vendor array doesn't include them so we must. */
-    uint8_t madctl = 0x00;
+     * vendor array doesn't include them so we must.
+     *
+     * MADCTL bits: MY=0x80, MX=0x40, MV=0x20, ML=0x10, BGR=0x08.
+     * 0xC0 = MY|MX → 180° rotation. The board's USB-C lands on the
+     * top edge of the physical panel; flipping the panel scan order
+     * here puts the UI's "up" direction toward the OPPOSITE edge so
+     * the user can sit the knob with USB-C at the bottom. Touch
+     * axes need a matching flip — see main.c::input_init. */
+    uint8_t madctl = 0xC0;
     esp_err_t err = tx_param(ST77916_CMD_MADCTL, &madctl, 1);
     if (err != ESP_OK) return err;
 
