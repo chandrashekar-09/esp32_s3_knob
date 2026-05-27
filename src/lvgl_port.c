@@ -79,6 +79,17 @@ static void lvgl_touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
     cst816_point_t pt = {};
     cst816_read(&pt);
 
+    /* Log state transitions only — printing every poll would drown the
+     * console. Surfaces "is the I2C read returning a press?" which is
+     * the first link in the chain when taps don't reach the UI. */
+    static bool was_touched = false;
+    if (pt.touched != was_touched) {
+        was_touched = pt.touched;
+        ESP_LOGI(kTag, "touch %s @ (%u,%u)",
+                 pt.touched ? "PRESS  " : "RELEASE",
+                 (unsigned)pt.x, (unsigned)pt.y);
+    }
+
     if (pt.touched) {
         data->state = LV_INDEV_STATE_PRESSED;
         data->point.x = pt.x;

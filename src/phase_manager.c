@@ -9,7 +9,13 @@
  *   PH_BOOT    — splash for ~1s after power-on
  *   PH_HOME    — main queue UI (encoder rotates queue level)
  *   PH_ADMIN   — settings (long-press from HOME to enter, long-press to exit)
- *   PH_SLEEP   — black screen (short tap or rotate to wake to HOME)
+ *
+ * Deep SLEEP is intentionally NOT reachable here. In the full product
+ * SLEEP only activates outside the operator-configured opening hours
+ * (OPEN_HR / CLOSE_HR setup steps). Since this build skips that whole
+ * setup chain, there's no schedule to honour and we stay in HOME
+ * indefinitely. PH_SLEEP stays defined in the enum so the header API
+ * keeps compiling, but no transition lands on it.
  *
  * All other PH_* values stay defined so the header API doesn't break,
  * but no transitions land on them in this build.
@@ -35,10 +41,19 @@ static const taxonomy_entry_t kTaxonomy[8] = {
 
 static app_state_t s_state = {};
 static uint32_t s_phase_enter_ms = 0;
+/* Last-input timestamp kept around for future use (opening-hours SLEEP
+ * gate, idle UI dimming). No reader in this build, but write-paths
+ * stay so the field stays current as input lands. */
 static uint32_t s_last_input_ms  = 0;
 
 #define BOOT_HOLD_MS         1000U
-#define SLEEP_TIMEOUT_MS    60000U   /* idle → SLEEP after 60s */
+
+/* Encoder sensitivity: this many raw detents in one direction commits a
+ * single status level change. The UI animates the queue arc per raw
+ * detent (via app_state.queue_sub_step) while the discrete status word
+ * only updates on commits — knob feels responsive without the level
+ * changing on every click. Set to 1 for raw 1:1 behaviour. */
+#define DETENTS_PER_STEP     3
 
 static uint32_t now_ms(void)
 {
@@ -67,6 +82,7 @@ void phase_manager_init(void)
     s_state.cor_int = 15;
     s_state.queue_level = 1;
     s_state.status_level = 1;
+    s_state.queue_sub_step = 0;
     s_state.nav_mode = NAV_QUEUE;
     s_phase_enter_ms = now_ms();
     s_last_input_ms = s_phase_enter_ms;
@@ -116,32 +132,44 @@ void phase_manager_on_encoder(int delta)
     uint32_t now = now_ms();
     s_last_input_ms = now;
 
-    /* Wake from sleep on any rotation. */
-    if (s_state.phase == PH_SLEEP) {
-        phase_enter(PH_HOME, now);
-        return;
+    switch (s_state.phase) {
+    case PH_HOME: {
+        /* Damped queue-level commit. Each raw detent moves sub_step by
+         * ±1. When |sub_step| reaches DETENTS_PER_STEP the level
+         * commits and sub_step resets. Within the same direction, a
+         * partial sub_step persists between detents so the UI's arc
+         * animation can interpolate; switching direction wipes the
+         * residual so a CCW tick after CW ticks doesn't have to drain
+         * the prior accumulation first. */
+        int p = (int)s_state.queue_sub_step;
+        if ((delta > 0 && p < 0) || (delta < 0 && p > 0)) {
+            p = 0;
+        }
+        p += delta;
+        int lvl = (int)s_state.queue_level;
+        while (p >=  DETENTS_PER_STEP && lvl < 8) { lvl++; p -= DETENTS_PER_STEP; }
+        while (p <= -DETENTS_PER_STEP && lvl > 1) { lvl--; p += DETENTS_PER_STEP; }
+        /* At the rails (level 1 or 8) the residual would point past
+         * the clamp — zero it so the arc can't visually creep beyond
+         * the discrete level. */
+        if (lvl >= 8 && p > 0) p = 0;
+        if (lvl <= 1 && p < 0) p = 0;
+        if (p >  DETENTS_PER_STEP - 1) p =  DETENTS_PER_STEP - 1;
+        if (p < -(DETENTS_PER_STEP - 1)) p = -(DETENTS_PER_STEP - 1);
+        s_state.queue_level   = (uint8_t)lvl;
+        s_state.status_level  = (uint8_t)lvl;
+        s_state.queue_sub_step = (int8_t)p;
+        break;
     }
 
-    switch (s_state.phase) {
-    case PH_HOME:
-        /* Queue level 1..8 with hard clamp (no wrap — matches simulator). */
-        if (delta > 0 && s_state.queue_level < 8) {
-            s_state.queue_level++;
-        } else if (delta < 0 && s_state.queue_level > 1) {
-            s_state.queue_level--;
-        }
-        s_state.status_level = s_state.queue_level;
+    case PH_ADMIN: {
+        /* In ADMIN: rotate cabin count 0..16. No damping — admin tweaks
+         * are deliberate, raw 1:1 feels right for entering exact counts. */
+        int v = (int)s_state.cab_count + delta;
+        if (v < 0) v = 0; else if (v > 16) v = 16;
+        s_state.cab_count = (uint8_t)v;
         break;
-
-    case PH_ADMIN:
-        /* In ADMIN: rotate cabin count 0..16 (the one user-tunable setting
-         * we expose right now). */
-        if (delta > 0 && s_state.cab_count < 16) {
-            s_state.cab_count++;
-        } else if (delta < 0 && s_state.cab_count > 0) {
-            s_state.cab_count--;
-        }
-        break;
+    }
 
     default:
         break;
@@ -156,14 +184,11 @@ void phase_manager_on_button(bool pressed, uint32_t duration_ms)
     uint32_t now = now_ms();
     s_last_input_ms = now;
 
-    /* Any press wakes from sleep. */
-    if (s_state.phase == PH_SLEEP) {
-        phase_enter(PH_HOME, now);
-        return;
-    }
-
-    /* Long-press: toggle HOME ↔ ADMIN. */
-    if (duration_ms >= 2000) {
+    /* Long-press: toggle HOME ↔ ADMIN. Threshold matches the encoder
+     * driver's LONG_PRESS_MS (1500). The encoder fires the event
+     * immediately when the threshold is reached during the hold, so
+     * the user feels the menu open before they let go. */
+    if (duration_ms >= 1500) {
         if (s_state.phase == PH_HOME) {
             phase_enter(PH_ADMIN, now);
         } else if (s_state.phase == PH_ADMIN) {
@@ -191,16 +216,10 @@ void phase_manager_tick(uint32_t now)
         }
         break;
 
-    case PH_HOME:
-        /* Idle → SLEEP. Sleep is opt-out for now (set SLEEP_TIMEOUT_MS to
-         * 0 to disable). */
-        if (SLEEP_TIMEOUT_MS > 0 &&
-            (now - s_last_input_ms) > SLEEP_TIMEOUT_MS) {
-            phase_enter(PH_SLEEP, now);
-        }
-        break;
-
     default:
+        /* HOME / ADMIN sit until input drives a transition. No idle →
+         * SLEEP timer: deep sleep is reserved for outside-opening-hours
+         * in the full setup flow, which this build skips. */
         break;
     }
 }

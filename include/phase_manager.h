@@ -78,6 +78,12 @@ typedef struct {
     uint8_t orient_pos;
     uint8_t queue_level;
     uint8_t status_level;
+    /* Sub-step accumulator: -(STEP-1)..+(STEP-1). Each raw encoder
+     * detent adjusts this by ±1; when |queue_sub_step| reaches STEP, the
+     * level commits and the accumulator resets to 0. The UI uses this
+     * to animate the queue arc continuously while the discrete status
+     * word only changes on level commits. */
+    int8_t queue_sub_step;
     bool is_master;
     app_master_mode_t master_mode;
     uint8_t master_target;

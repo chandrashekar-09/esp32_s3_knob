@@ -30,12 +30,16 @@ static void encoder_event_handler(const encoder_event_t *evt, void *ctx)
     }
 
     if (evt->delta != 0) {
+        ESP_LOGI(TAG_MAIN, "ENC rotate %+d  → phase=%d", evt->delta,
+                 (int)phase_manager_get_phase());
         phase_manager_on_encoder(evt->delta);
     }
     if (evt->pressed) {
+        const char *kind = evt->duration_ms >= 1500 ? "LONG" : "SHORT";
+        ESP_LOGI(TAG_MAIN, "ENC press %s (%ums)  → phase=%d", kind,
+                 (unsigned)evt->duration_ms, (int)phase_manager_get_phase());
         phase_manager_on_button(true, evt->duration_ms);
     }
-    ui_engine_set_phase(phase_manager_get_phase());
 }
 
 static void input_init(void)
