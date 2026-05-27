@@ -13,7 +13,6 @@ static encoder_event_cb_t s_cb = NULL;
 static void *s_cb_ctx = NULL;
 static pcnt_unit_handle_t s_unit = NULL;
 static pcnt_channel_handle_t s_chan_a = NULL;
-static pcnt_channel_handle_t s_chan_b = NULL;
 static int64_t s_btn_down_us = 0;
 static int64_t s_btn_last_edge_us = 0;
 static int s_btn_pin = -1;
@@ -131,16 +130,13 @@ esp_err_t encoder_init(const encoder_config_t *config, encoder_event_cb_t cb, vo
         .level_gpio_num = config->pin_b,
     };
     ESP_ERROR_CHECK(pcnt_new_channel(s_unit, &chan_a_cfg, &s_chan_a));
-    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(s_chan_a, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE));
-    ESP_ERROR_CHECK(pcnt_channel_set_level_action(s_chan_a, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
-
-    pcnt_chan_config_t chan_b_cfg = {
-        .edge_gpio_num = config->pin_b,
-        .level_gpio_num = config->pin_a,
-    };
-    ESP_ERROR_CHECK(pcnt_new_channel(s_unit, &chan_b_cfg, &s_chan_b));
-    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(s_chan_b, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
-    ESP_ERROR_CHECK(pcnt_channel_set_level_action(s_chan_b, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
+    /* Count only on A rising edges. Use B level to set direction. */
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(s_chan_a,
+                                                 PCNT_CHANNEL_EDGE_ACTION_INCREASE,
+                                                 PCNT_CHANNEL_EDGE_ACTION_HOLD));
+    ESP_ERROR_CHECK(pcnt_channel_set_level_action(s_chan_a,
+                                                  PCNT_CHANNEL_LEVEL_ACTION_KEEP,
+                                                  PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
 
     pcnt_unit_enable(s_unit);
     pcnt_unit_clear_count(s_unit);

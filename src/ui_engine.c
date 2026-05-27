@@ -288,13 +288,12 @@ static void ui_build(void)
     arc_setup(s_rings[3], 252, 3);
 
     s_wordmark = make_label("QUESORT", LV_ALIGN_TOP_MID, 0, 8, UI_ACCENT_HEX, 4, &lv_font_montserrat_12);
-    s_subtitle = make_label("MULTI-SPECTRUM", LV_ALIGN_TOP_MID, 0, 22, UI_TEXT_FAINT_HEX, 2, &lv_font_montserrat_8);
-    make_label("UNIFIED SIMULATOR", LV_ALIGN_TOP_MID, 0, 34, UI_TEXT_FAINT_HEX, 2, &lv_font_montserrat_8);
+    s_subtitle = make_label("MULTI-SPECTRUM", LV_ALIGN_TOP_MID, 0, 22, UI_TEXT_FAINT_HEX, 2, &lv_font_montserrat_10);
+    make_label("UNIFIED SIMULATOR", LV_ALIGN_TOP_MID, 0, 34, UI_TEXT_FAINT_HEX, 2, &lv_font_montserrat_10);
 
     const int step_w = 78;
     const int step_h = 13;
     const int step_gap = 4;
-    const int rows = 2;
     const int cols = 4;
     const int grid_w = cols * step_w + (cols - 1) * step_gap;
     const int start_x = (lv_obj_get_width(s_screen) - grid_w) / 2;
@@ -312,7 +311,7 @@ static void ui_build(void)
                    start_x + col * (step_w + step_gap),
                    start_y + row * (step_h + 2));
         lv_obj_set_style_text_align(step, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_style_text_font(step, &lv_font_montserrat_8, LV_PART_MAIN);
+        lv_obj_set_style_text_font(step, &lv_font_montserrat_10, LV_PART_MAIN);
         lv_obj_set_style_text_letter_space(step, 1, LV_PART_MAIN);
         lv_obj_set_style_border_width(step, 1, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(step, LV_OPA_COVER, LV_PART_MAIN);
@@ -321,11 +320,11 @@ static void ui_build(void)
         s_steps[i] = step;
     }
 
-    s_status = make_label("POWER ON TO BEGIN", LV_ALIGN_TOP_MID, 0, 82, UI_TEXT_DIM_HEX, 2, &lv_font_montserrat_8);
-    s_center = make_label("Q1", LV_ALIGN_CENTER, 0, -12, 0xFFFFFF, 2, &lv_font_montserrat_28);
+    s_status = make_label("POWER ON TO BEGIN", LV_ALIGN_TOP_MID, 0, 82, UI_TEXT_DIM_HEX, 2, &lv_font_montserrat_10);
+    s_center = make_label("Q1", LV_ALIGN_CENTER, 0, -12, 0xFFFFFF, 2, &lv_font_montserrat_16);
     s_level = make_label("EMPTY", LV_ALIGN_CENTER, 0, 22, UI_ACCENT_HEX, 2, &lv_font_montserrat_12);
-    s_hint = make_label("ROTATE QUEUE  HOLD ADMIN", LV_ALIGN_BOTTOM_MID, 0, -46, UI_TEXT_FAINT_HEX, 1, &lv_font_montserrat_8);
-    s_ota = make_label("OTA WAITING", LV_ALIGN_BOTTOM_MID, 0, -26, UI_TEXT_DIM_HEX, 1, &lv_font_montserrat_8);
+    s_hint = make_label("ROTATE QUEUE  HOLD ADMIN", LV_ALIGN_BOTTOM_MID, 0, -46, UI_TEXT_FAINT_HEX, 1, &lv_font_montserrat_10);
+    s_ota = make_label("OTA WAITING", LV_ALIGN_BOTTOM_MID, 0, -26, UI_TEXT_DIM_HEX, 1, &lv_font_montserrat_10);
 }
 
 static int ring_value(uint8_t level)
@@ -345,7 +344,7 @@ static void ui_apply_home(const ui_state_t *state)
     uint32_t color = color_for_level(level);
 
     lv_label_set_text_fmt(s_center, "Q%u", (unsigned)level);
-    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_28, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_center, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_label_set_text(s_level, label_for_level(level));
     lv_obj_set_style_text_color(s_level, lv_color_hex(color), LV_PART_MAIN);
 
