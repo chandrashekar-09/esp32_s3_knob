@@ -32,11 +32,16 @@
  * `TFT_SPI_FREQ_HZ` exactly. The panel module is qualified at this rate. */
 #define APP_DISPLAY_PCLK_HZ (50 * 1000 * 1000)
 
-#define APP_MESH_ROUTER_SSID "IIIT-Guest"
-#define APP_MESH_ROUTER_PASS "f6s68VHJ89mC"
+//#define APP_MESH_ROUTER_SSID "IIIT-Guest"
+//#define APP_MESH_ROUTER_PASS "f6s68VHJ89mC"
+
+#define APP_MESH_ROUTER_SSID "TEAMPLAYER 9060"
+#define APP_MESH_ROUTER_PASS "7mA82;58"
+
+
 #define APP_MESH_AP_PASS "mesh_ap_pass"
 
-#define APP_OTA_CURRENT_VERSION 2
+#define APP_OTA_CURRENT_VERSION 3
 #define APP_OTA_VERSION_URL "https://raw.githubusercontent.com/chandrashekar-09/esp32_s3_knob/main/version.txt"
 #define APP_OTA_FIRMWARE_URL "https://raw.githubusercontent.com/chandrashekar-09/esp32_s3_knob/main/.pio/build/esp32-s3/firmware.bin"
 #define APP_OTA_DEVICE_ID "knob-002"

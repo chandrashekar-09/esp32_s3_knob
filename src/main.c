@@ -2,7 +2,7 @@
  * JC3636K718 ESP32-S3 1.8" knob — LVGL UI bring-up (ESP-IDF).
  *
  * Core 1: UI render loop + input (LVGL, touch, encoder) per structure.md.
- * Core 0: unused for now (no mesh/network yet).
+ * Core 0: WiFi STA + OTA poller (esp_wifi internals + ota_task).
  */
 
 #include <string.h>
@@ -17,8 +17,10 @@
 #include "app_mutex.h"
 #include "input_encoder.h"
 #include "lvgl_port.h"
+#include "ota_service.h"
 #include "phase_manager.h"
 #include "ui_engine.h"
+#include "wifi_manager.h"
 
 static const char *TAG_MAIN = "knob";
 
@@ -113,6 +115,19 @@ void app_main(void)
     phase_manager_init();
     input_init();
 
+    /* UI owns Core 1 — render loop + LVGL + encoder polling. */
     xTaskCreatePinnedToCore(ui_task, "ui_task", 6144, NULL, 4, NULL, 1);
+
+    /* WiFi + OTA on Core 0. Brought up AFTER the UI task is created so
+     * the first paint (BOOT screen) lands before the WiFi driver starts
+     * eating cycles. wifi_manager_init() returns once the driver is
+     * started; the IP-acquired callback flips wifi_manager_is_connected()
+     * which the OTA poller awaits. Failures here don't kill the UI. */
+    if (wifi_manager_init() == ESP_OK) {
+        ota_service_start();
+    } else {
+        ESP_LOGW(TAG_MAIN, "wifi init failed — OTA polling disabled");
+    }
+
     ESP_LOGI(TAG_MAIN, "ui firmware started");
 }
