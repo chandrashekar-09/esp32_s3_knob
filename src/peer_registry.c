@@ -76,6 +76,7 @@ void peer_registry_sync_own(const app_state_t *st)
     s_peers[0].type        = st->device_type;
     s_peers[0].number      = st->device_number;
     s_peers[0].queue_level = st->queue_level;
+    s_peers[0].sub_step    = st->queue_sub_step;
 }
 
 int peer_registry_upsert(const peer_t *p)
@@ -98,6 +99,7 @@ int peer_registry_upsert(const peer_t *p)
     s_peers[idx].type        = p->type;
     s_peers[idx].number      = p->number;
     s_peers[idx].queue_level = p->queue_level;
+    s_peers[idx].sub_step    = p->sub_step;
     return idx;
 }
 

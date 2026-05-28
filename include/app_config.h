@@ -80,10 +80,19 @@
 #define APP_MESH_ROUTER_SSID "TEAMPLAYER 9060"
 #define APP_MESH_ROUTER_PASS "7mA82;58"
 
+/* Fallback SSID — wifi_manager alternates primary ↔ fallback on
+ * each retry so a credential rotation doesn't strand the fleet
+ * with an unreachable OTA endpoint. Set the fallback to the
+ * PRIOR primary so newly-flashed firmware can still connect via
+ * the network the older firmware was using, pull the OTA over
+ * THAT network, and update. Leave empty ("") to disable. */
+#define APP_MESH_ROUTER_SSID_FALLBACK "IIIT-Guest"
+#define APP_MESH_ROUTER_PASS_FALLBACK "f6s68VHJ89mC"
+
 
 #define APP_MESH_AP_PASS "mesh_ap_pass"
 
-#define APP_OTA_CURRENT_VERSION 4
+#define APP_OTA_CURRENT_VERSION 5
 #define APP_OTA_VERSION_URL "https://raw.githubusercontent.com/chandrashekar-09/esp32_s3_knob/main/version.txt"
 #define APP_OTA_FIRMWARE_URL "https://raw.githubusercontent.com/chandrashekar-09/esp32_s3_knob/main/.pio/build/esp32-s3/firmware.bin"
 #define APP_OTA_DEVICE_ID "knob-002"

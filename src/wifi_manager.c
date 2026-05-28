@@ -26,6 +26,30 @@ static const char *kTag = "wifi";
 
 static volatile bool s_connected = false;
 static bool s_initialised = false;
+/* SSID alternation counter — flipped on every WIFI_EVENT_STA_DISCONNECTED
+ * so we toggle between primary and fallback credentials. Avoids
+ * fleet-stranding when the primary AP is renamed: old firmware can
+ * still join via fallback, pull OTA, reboot onto the new primary. */
+static uint32_t s_disconnect_count = 0;
+
+static void apply_ssid_for_attempt(uint32_t attempt)
+{
+    const bool use_fallback =
+        (attempt % 2 == 1) &&
+        (sizeof(APP_MESH_ROUTER_SSID_FALLBACK) > 1);   /* non-empty */
+    const char *ssid = use_fallback ? APP_MESH_ROUTER_SSID_FALLBACK
+                                    : APP_MESH_ROUTER_SSID;
+    const char *pass = use_fallback ? APP_MESH_ROUTER_PASS_FALLBACK
+                                    : APP_MESH_ROUTER_PASS;
+    wifi_config_t cfg = {0};
+    strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid) - 1);
+    strncpy((char *)cfg.sta.password, pass, sizeof(cfg.sta.password) - 1);
+    cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    ESP_LOGI(kTag, "attempt #%u → SSID '%s' (%s)",
+             (unsigned)attempt, ssid,
+             use_fallback ? "fallback" : "primary");
+}
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -38,7 +62,10 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             break;
         case WIFI_EVENT_STA_DISCONNECTED:
             s_connected = false;
-            ESP_LOGW(kTag, "disconnected — retrying");
+            s_disconnect_count++;
+            ESP_LOGW(kTag, "disconnected (#%u) — alternating SSID + retrying",
+                     (unsigned)s_disconnect_count);
+            apply_ssid_for_attempt(s_disconnect_count);
             esp_wifi_connect();
             break;
         default:

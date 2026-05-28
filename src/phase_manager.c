@@ -53,9 +53,16 @@ static uint32_t s_phase_enter_ms = 0;
 static uint32_t s_last_input_ms  = 0;
 
 /* Cumulative encoder progress — single source of truth for the
- * queue level. Range [0, MAX_QUEUE_PROGRESS] where MAX = (5-1) *
- * DETENTS_PER_STEP = 12. queue_level and queue_sub_step are DERIVED
- * from this on every encoder event:
+ * queue level. Range [0, MAX_QUEUE_PROGRESS] where MAX = 5 *
+ * DETENTS_PER_STEP - 1 = 14. Each of the 5 status levels gets its
+ * own 3-substep band (0..2), so the total span is 15 positions
+ * (progress 0..14). LONG QUE now has the same micro-step
+ * granularity as the others — previously MAX was 12 which capped
+ * LONG QUE at sub_step 0 only, breaking symmetry with EMPTY/FREE/
+ * FULL/QUE and starving the advisor's sub_step heuristics of
+ * LONG-QUE detail.
+ *
+ * Derivation per encoder event:
  *   level    = (progress / DETENTS_PER_STEP) + 1   (1..5)
  *   sub_step = progress % DETENTS_PER_STEP         (0..STEP-1)
  *
@@ -67,7 +74,7 @@ static uint32_t s_last_input_ms  = 0;
  * sub_step zeroed at every commit boundary — the eye saw the
  * commit but the state didn't remember how far past the boundary
  * it had gone. */
-#define MAX_QUEUE_PROGRESS  ((5 - 1) * DETENTS_PER_STEP)   /* = 12 */
+#define MAX_QUEUE_PROGRESS  (5 * DETENTS_PER_STEP - 1)   /* = 14 */
 static int s_queue_progress = 0;
 
 #define BOOT_HOLD_MS         1000U
@@ -262,7 +269,9 @@ void phase_manager_on_encoder(int delta)
         }
         int lvl = (s_queue_progress / DETENTS_PER_STEP) + 1;
         int sub = s_queue_progress % DETENTS_PER_STEP;
-        if (lvl > 5) { lvl = 5; sub = 0; }   /* progress==MAX edge case */
+        if (lvl > 5) lvl = 5;   /* defensive clamp; unreachable
+                                   given progress is clamped to
+                                   MAX_QUEUE_PROGRESS=14 above */
         s_state.queue_level    = (uint8_t)lvl;
         s_state.status_level   = (uint8_t)lvl;
         s_state.queue_sub_step = (int8_t)sub;

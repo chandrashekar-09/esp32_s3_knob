@@ -126,33 +126,41 @@ typedef struct {
     int16_t stroke;   /* outer_r - inner_r, cached */
 } ring_slot_geom_t;
 
-/* Two geometry tables — runtime-selected by active_ring_slots()
- * based on how many rings the busiest wedge actually uses:
+/* Four geometry tables — runtime-selected by active_ring_slots()
+ * based on how many rings the busiest wedge actually uses. Stroke
+ * scales with the radial budget freed up by fewer rings:
  *
- *   FULL (max=4 rings/wedge): stroke 20, all 4 slots populated.
- *     This is the original geometry. Used when 4+ rings appear in
- *     any wedge (e.g. 7-8 peers in HALF, 13-16 peers in QUARTER).
+ *   max=4: stroke 20 (baseline, 100 %)         — kRingSlots_m4
+ *   max=3: stroke 25 (+25 %)                    — kRingSlots_m3
+ *   max=2: stroke 30 (+50 %)                    — kRingSlots_m2
+ *   max=1: stroke 30 (same as m2; unspecified)  — kRingSlots_m1
  *
- *   THIN (max<=3 rings/wedge): stroke 26 (+6 px), only slots 0..2
- *     used, slot 3 unused. The bigger stroke gives Mont 22 numbers
- *     extra breathing room when the radial budget allows it.
- *
- * Both tables keep outer slot 0 outer_r=172 (no bezel encroachment)
- * and the same 6 px inter-ring gap. The THIN table's slot 2 inner
- * lands at radius 82, leaving a 22 px gap to the r=60 disc. */
-static const ring_slot_geom_t kRingSlots_full[4] = {
+ * All four tables anchor slot 0's outer at 172 (no bezel encroach)
+ * and use a 6 px inter-ring gap. Unused slots are zeroed so any
+ * accidental reference paints nothing instead of a garbled overlap. */
+static const ring_slot_geom_t kRingSlots_m4[4] = {
     { 172, 152, 20 },   /* slot 0 — outermost */
     { 146, 126, 20 },   /* gap 6 from slot 0 inner */
     { 120, 100, 20 },   /* gap 6 from slot 1 inner */
     {  94,  74, 20 },   /* slot 3 — innermost */
 };
-static const ring_slot_geom_t kRingSlots_thin[4] = {
-    { 172, 146, 26 },   /* slot 0 — thicker, more breathing room */
-    { 140, 114, 26 },   /* gap 6 from slot 0 inner */
-    { 108,  82, 26 },   /* slot 2 — innermost in this mode */
-    {  82,  82,  0 },   /* slot 3 unused; zeroed so any accidental
-                           reference renders nothing instead of a
-                           garbled overlapping ring */
+static const ring_slot_geom_t kRingSlots_m3[4] = {
+    { 172, 147, 25 },   /* slot 0 — +25 % thicker */
+    { 141, 116, 25 },
+    { 110,  85, 25 },   /* slot 2 — innermost in this mode */
+    {  85,  85,  0 },   /* slot 3 unused */
+};
+static const ring_slot_geom_t kRingSlots_m2[4] = {
+    { 172, 142, 30 },   /* slot 0 — +50 % thicker */
+    { 136, 106, 30 },   /* slot 1 — innermost in this mode */
+    { 106, 106,  0 },   /* slot 2 unused */
+    { 106, 106,  0 },   /* slot 3 unused */
+};
+static const ring_slot_geom_t kRingSlots_m1[4] = {
+    { 172, 142, 30 },   /* slot 0 — only ring; stroke matches m2 */
+    { 142, 142,  0 },   /* slot 1 unused */
+    { 142, 142,  0 },   /* slot 2 unused */
+    { 142, 142,  0 },   /* slot 3 unused */
 };
 
 /* Pick the active table for the current frame. Caller passes the
@@ -160,7 +168,10 @@ static const ring_slot_geom_t kRingSlots_thin[4] = {
  * via ceil(total/W)). */
 static inline const ring_slot_geom_t *active_ring_slots(uint8_t max_rings)
 {
-    return (max_rings >= 4) ? kRingSlots_full : kRingSlots_thin;
+    if (max_rings >= 4) return kRingSlots_m4;
+    if (max_rings == 3) return kRingSlots_m3;
+    if (max_rings == 2) return kRingSlots_m2;
+    return kRingSlots_m1;  /* max_rings == 0 or 1 */
 }
 
 /* Wedge angular layout per tier. Each entry is the (rotation,
@@ -898,14 +909,22 @@ static void apply_home(const app_state_t *state)
     /* OWN target uses the (level + sub_step) accumulator so detents
      * animate the arc smoothly between discrete levels. Peers from
      * the mesh don't have a sub_step (they only ship discrete
-     * levels), so their targets are just (level-1)/4 * 100. */
+     * levels), so their targets are just (level-1)/4 * 100.
+     *
+     * Progress range now spans 0..14 (was 0..12) so LONG QUE (level 5)
+     * gets its own 3-substep band — sub 0 at 85.7 %, sub 2 at 100 %.
+     * Without this widening, LONG QUE always rendered as a fully-
+     * filled wedge regardless of which detent inside LONG QUE we
+     * were on, hiding the sub-step granularity the encoder produces
+     * and the advisor consumes. */
     enum { STEP = 3 };  /* must match DETENTS_PER_STEP in phase_manager.c */
+    enum { PROG_MAX = 5 * STEP - 1 };   /* 14 — full sub-step range across 5 levels */
     int sub = state->queue_sub_step;
     if (sub > STEP - 1)  sub = STEP - 1;
     if (sub < -(STEP - 1)) sub = -(STEP - 1);
     int prog = (level - 1) * STEP + sub;
-    if (prog < 0) prog = 0; else if (prog > 4 * STEP) prog = 4 * STEP;
-    int own_target = prog * 100 / (4 * STEP);
+    if (prog < 0) prog = 0; else if (prog > PROG_MAX) prog = PROG_MAX;
+    int own_target = prog * 100 / PROG_MAX;
 
     uint32_t fr_col = device_color_for_number(state->device_number);
 
@@ -955,9 +974,21 @@ static void apply_home(const app_state_t *state)
             own_ring_slot = slot;
             own_ring_wedge = wedge;
         } else {
+            /* Mirror the own-target formula so peer fills also
+             * reflect sub_step granularity (covers LONG QUE 85→100 %
+             * band and every other level's micro-positions). Real-
+             * mesh peers default sub_step to 0 until the broadcast
+             * protocol carries it; sim peers carry randomised
+             * sub_steps via peer_sim_populate. */
             int pl = p->queue_level;
             if (pl < 1) pl = 1; else if (pl > 5) pl = 5;
-            p_target = (pl - 1) * 100 / 4;
+            int psub = p->sub_step;
+            if (psub > STEP - 1) psub = STEP - 1;
+            if (psub < -(STEP - 1)) psub = -(STEP - 1);
+            int pprog = (pl - 1) * STEP + psub;
+            if (pprog < 0) pprog = 0;
+            else if (pprog > PROG_MAX) pprog = PROG_MAX;
+            p_target = pprog * 100 / PROG_MAX;
         }
         update_peer_wedge(peer_count, gm, an, pa, COL_TRACK, p_target);
 
@@ -1012,6 +1043,12 @@ static void apply_home(const app_state_t *state)
         int fill_angle = ow->rotation + (own_target * ow->span) / 100;
         int bx, by;
         polar_to_screen(mid_r, fill_angle, &bx, &by);
+        /* Ball diameter tracks the active ring stroke so it always
+         * pokes out from the wedge edges. +4 px per side gives a
+         * 2 px overhang above and below the ring fill regardless of
+         * which geometry table is active (stroke 20/25/30). */
+        int ball_d = og->stroke + 4;
+        lv_obj_set_size(s_own_end_ball, ball_d, ball_d);
         lv_obj_align(s_own_end_ball, LV_ALIGN_CENTER, bx - 180, by - 180);
         lv_obj_set_style_bg_color(s_own_end_ball, lv_color_hex(fr_col), 0);
         lv_obj_set_style_border_color(s_own_end_ball,
@@ -1093,7 +1130,7 @@ static void apply_home(const app_state_t *state)
     if (show_reminder) {
         static const struct { const char *l1; const char *l2; } kReminders[] = {
             { "HANDOUT",  "BASKETS"  },
-            { "DOWNLOAD", "APP"      },
+            { "PROMOTE",  "APP"      },
             { "THANK",    "PATIENCE" },
         };
         enum { N_REMINDERS = sizeof(kReminders) / sizeof(kReminders[0]) };

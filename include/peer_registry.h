@@ -24,6 +24,15 @@ typedef struct {
     device_type_t type;
     uint8_t       number;          /* 1..16 */
     uint8_t       queue_level;     /* 1..5  */
+    /* Sub-step within current level: -(STEP-1)..+(STEP-1), STEP=3
+     * so range -2..+2. +2 means "one encoder detent from advancing
+     * to the next level"; -2 means "one detent from retreating".
+     * Advisor uses this to reject FULL peers that are sub_step=+2
+     * (about to commit to QUE) as receivers, so LONG-QUE senders
+     * aren't redirected to a place that's about to be overloaded.
+     * Stale-by-broadcast: only updated on level commit until the
+     * mesh broadcast protocol carries sub_step too. */
+    int8_t        sub_step;
     uint8_t       prev_level;      /* previous distinct level (trend) */
     uint32_t      prev_level_ms;   /* when prev_level became prev    */
     uint32_t      curr_level_ms;   /* when curr level became current */

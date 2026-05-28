@@ -11,7 +11,7 @@
  *
  * Constants (5-state values):
  *   ADV_SENDER_FROM     = 4   QUE — may redirect away
- *   ADV_RECEIVER_TO     = 2   FREE — may absorb a redirect
+ *   ADV_RECEIVER_TO     = 3   FULL — may absorb a redirect (was 2)
  *   ADV_MIN_GAP         = 2   sender − receiver gap floor
  *   ADV_URGENT_FROM     = 5   LONG QUE → urgent render
  *   ADV_HYSTERESIS_MS   = 20000  hold target 20 s to prevent flicker
@@ -19,6 +19,16 @@
  * Receiver caps (max sends a receiver can absorb per cycle):
  *   EMPTY (1) → 3
  *   FREE  (2) → 2
+ *   FULL  (3) → 1  (newly admitted; limited headroom)
+ *
+ * FULL-peer guard: a FULL peer with sub_step = +2 is "one encoder
+ * detent from QUE" and gets EXCLUDED as a receiver. Without this
+ * guard, a LONG QUE → FULL redirect could land on a peer that's
+ * about to be overloaded itself. Per-step granularity lets the
+ * advisor differentiate "barely FULL, almost FREE" (safe target)
+ * from "almost QUE" (don't pile on). MIN_GAP=2 already blocks
+ * QUE → FULL redirects (gap=1) so the FULL receiver branch only
+ * fires for LONG QUE senders.
  */
 
 #include "advisor.h"
@@ -31,11 +41,25 @@
 
 static const char *kTag = "advisor";
 
-#define ADV_SENDER_FROM     4
-#define ADV_RECEIVER_TO     2
-#define ADV_MIN_GAP         2
-#define ADV_URGENT_FROM     5
-#define ADV_HYSTERESIS_MS   20000U
+#define ADV_SENDER_FROM       4
+#define ADV_RECEIVER_TO       3   /* FULL now eligible (was 2 = FREE) */
+#define ADV_MIN_GAP           2
+#define ADV_URGENT_FROM       5
+#define ADV_HYSTERESIS_MS     20000U
+/* FULL receiver-only guard: if peer.queue_level == 3 AND
+ * peer.sub_step >= this threshold, treat them as already-QUE for
+ * redirect purposes. +2 = "one detent away from committing to QUE". */
+#define ADV_FULL_REJECT_SUB   2
+
+/* QUE sender-only guard: symmetric to ADV_FULL_REJECT_SUB. A peer
+ * at QUE (level 4) with sub_step <= -2 is one detent away from
+ * dropping to FULL and should NOT be treated as a sender anymore —
+ * their queue is actively clearing. Trend-based filtering already
+ * catches multi-level drops within 30 s; this sub_step guard
+ * catches the finer "single-level rollback" case that trend can't
+ * see. LONG QUE (level 5) senders are unaffected: even with
+ * sub_step -2 they're still LONG QUE, still a sender. */
+#define ADV_QUE_REJECT_SUB    -2
 
 /* Snapshot capacity = peer registry capacity. */
 #define SNAPSHOT_MAX        32
@@ -43,6 +67,7 @@ static const char *kTag = "advisor";
 typedef struct {
     uint8_t number;
     uint8_t level;
+    int8_t  sub_step;
     int8_t  trend;
     bool    is_self;
 } fleet_node_t;
@@ -76,7 +101,33 @@ static uint8_t receiver_cap(uint8_t level)
 {
     if (level == 1) return 3;   /* EMPTY — most absorptive */
     if (level == 2) return 2;   /* FREE */
-    return 0;                    /* FULL/QUE/LONG QUE not receivers */
+    if (level == 3) return 1;   /* FULL — newly admitted, capped */
+    return 0;                    /* QUE / LONG QUE not receivers */
+}
+
+/* True iff this peer is a FULL with sub_step at-or-past the reject
+ * threshold (i.e. about to commit to QUE). Used to exclude that
+ * peer from receiver consideration even though level == 3 passes
+ * the broad ADV_RECEIVER_TO check. */
+static bool is_overloaded_full(const peer_t *p)
+{
+    return (p && p->queue_level == 3 && p->sub_step >= ADV_FULL_REJECT_SUB);
+}
+
+/* Snapshot-friendly variant — works on the fleet_node we already
+ * built. peer_t pointer-based predicate above is for the hysteresis
+ * path where we still have the registry handle. */
+static bool fleet_is_overloaded_full(uint8_t level, int8_t sub_step)
+{
+    return (level == 3 && sub_step >= ADV_FULL_REJECT_SUB);
+}
+
+/* Symmetric predicate for senders: a QUE peer about to drop to FULL
+ * shouldn't be acting as a sender any more. LONG QUE (level 5) is
+ * never excluded — they stay senders regardless of sub_step. */
+static bool fleet_is_clearing_que(uint8_t level, int8_t sub_step)
+{
+    return (level == 4 && sub_step <= ADV_QUE_REJECT_SUB);
 }
 
 void advisor_init(void)
@@ -108,6 +159,7 @@ void advisor_recompute(const app_state_t *st, advisor_advice_t *out)
         }
         if (held && held->online &&
             held->queue_level <= ADV_RECEIVER_TO &&
+            !is_overloaded_full(held) &&
             (int)self_level - (int)held->queue_level >= ADV_MIN_GAP) {
             out->active        = true;
             out->target_number = held->number;
@@ -126,11 +178,12 @@ void advisor_recompute(const app_state_t *st, advisor_advice_t *out)
     const peer_t *p;
     while ((p = peer_iter_next(&it)) != NULL && n_fleet < SNAPSHOT_MAX) {
         if (p->queue_level < 1 || p->queue_level > 5) continue;
-        fleet[n_fleet].number  = p->number;
-        fleet[n_fleet].level   = p->queue_level;
-        fleet[n_fleet].trend   = (int8_t)peer_trend(p, now);
-        fleet[n_fleet].is_self = (p->type == st->device_type &&
-                                   p->number == st->device_number);
+        fleet[n_fleet].number   = p->number;
+        fleet[n_fleet].level    = p->queue_level;
+        fleet[n_fleet].sub_step = p->sub_step;
+        fleet[n_fleet].trend    = (int8_t)peer_trend(p, now);
+        fleet[n_fleet].is_self  = (p->type == st->device_type &&
+                                    p->number == st->device_number);
         n_fleet++;
     }
 
@@ -142,17 +195,21 @@ void advisor_recompute(const app_state_t *st, advisor_advice_t *out)
 
     /* ── Step 3: Build sender list ──────────────────────────────
      * level >= SENDER_FROM AND trend >= 0 (don't redirect from a
-     * knob that's already clearing). */
+     * knob that's already clearing). QUE peers with sub_step <= -2
+     * are additionally excluded — they're one detent from FULL and
+     * the queue is actively draining. */
     sender_entry_t senders[SNAPSHOT_MAX];
     int n_senders = 0;
     for (int i = 0; i < n_fleet; i++) {
-        if (fleet[i].level >= ADV_SENDER_FROM && fleet[i].trend >= 0) {
-            senders[n_senders].number  = fleet[i].number;
-            senders[n_senders].level   = fleet[i].level;
-            senders[n_senders].trend   = fleet[i].trend;
-            senders[n_senders].is_self = fleet[i].is_self;
-            n_senders++;
-        }
+        if (fleet[i].level < ADV_SENDER_FROM) continue;
+        if (fleet[i].trend < 0) continue;
+        if (fleet_is_clearing_que(fleet[i].level, fleet[i].sub_step)) continue;
+
+        senders[n_senders].number  = fleet[i].number;
+        senders[n_senders].level   = fleet[i].level;
+        senders[n_senders].trend   = fleet[i].trend;
+        senders[n_senders].is_self = fleet[i].is_self;
+        n_senders++;
     }
     if (n_senders == 0) {
         s_last_target_num = 0;
@@ -173,18 +230,22 @@ void advisor_recompute(const app_state_t *st, advisor_advice_t *out)
 
     /* ── Step 4: Build receiver list ────────────────────────────
      * level <= RECEIVER_TO AND trend <= 0 (don't pile onto a
-     * filling receiver). Excludes self. Each gets a cap. */
+     * filling receiver). FULL peers with sub_step >= +2 are
+     * additionally excluded — they're one detent from QUE and
+     * shouldn't be redirected to. Excludes self. Each gets a cap. */
     receiver_entry_t receivers[SNAPSHOT_MAX];
     int n_receivers = 0;
     for (int i = 0; i < n_fleet; i++) {
         if (fleet[i].is_self) continue;
-        if (fleet[i].level <= ADV_RECEIVER_TO && fleet[i].trend <= 0) {
-            receivers[n_receivers].number = fleet[i].number;
-            receivers[n_receivers].level  = fleet[i].level;
-            receivers[n_receivers].trend  = fleet[i].trend;
-            receivers[n_receivers].cap    = receiver_cap(fleet[i].level);
-            n_receivers++;
-        }
+        if (fleet[i].level > ADV_RECEIVER_TO) continue;
+        if (fleet[i].trend > 0) continue;
+        if (fleet_is_overloaded_full(fleet[i].level, fleet[i].sub_step)) continue;
+
+        receivers[n_receivers].number = fleet[i].number;
+        receivers[n_receivers].level  = fleet[i].level;
+        receivers[n_receivers].trend  = fleet[i].trend;
+        receivers[n_receivers].cap    = receiver_cap(fleet[i].level);
+        n_receivers++;
     }
 
     /* ── Step 5: Greedy assignment ──────────────────────────────

@@ -124,21 +124,35 @@ static bool apply_firmware_update(void)
 static void ota_task(void *arg)
 {
     (void)arg;
+    ESP_LOGI(kTag, "ota task started — poll every %u s, first poll in %u s",
+             (unsigned)(OTA_POLL_INTERVAL_MS / 1000),
+             (unsigned)(OTA_FIRST_DELAY_MS / 1000));
     vTaskDelay(pdMS_TO_TICKS(OTA_FIRST_DELAY_MS));
 
+    uint32_t tick = 0;
     while (true) {
+        tick++;
         if (!wifi_manager_is_connected()) {
-            ESP_LOGD(kTag, "skip: no WiFi");
+            /* Log every tick at INFO so a "stuck without WiFi"
+             * situation is visible in serial output. Before this
+             * was DEBUG and effectively invisible — that hid the
+             * credential-rotation bug where v3 firmware was
+             * looking for an SSID no longer in range. */
+            ESP_LOGI(kTag, "skip #%u: no WiFi (SSID '%s')",
+                     (unsigned)tick, APP_MESH_ROUTER_SSID);
         } else {
             int latest = 0;
             if (fetch_latest_version(&latest)) {
                 if (latest > APP_OTA_CURRENT_VERSION) {
+                    ESP_LOGI(kTag, "new version %d available (current %d) — updating",
+                             latest, APP_OTA_CURRENT_VERSION);
                     if (apply_firmware_update()) {
                         vTaskDelay(pdMS_TO_TICKS(1000));
                         esp_restart();  /* no return */
                     }
                 } else {
-                    ESP_LOGI(kTag, "up to date");
+                    ESP_LOGI(kTag, "up to date (latest=%d, current=%d)",
+                             latest, APP_OTA_CURRENT_VERSION);
                 }
             }
         }

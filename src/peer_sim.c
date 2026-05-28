@@ -53,11 +53,15 @@ void peer_sim_populate(const app_state_t *own)
         if (num == own->device_number) continue;   /* own already added */
 
         uint8_t level = (uint8_t)((esp_random() % 5) + 1);
+        /* Random sub-step -2..+2 so the advisor's sub_step-aware
+         * FULL rejection has variety to exercise. */
+        int8_t  sub   = (int8_t)((int)(esp_random() % 5) - 2);
         peer_t p = {
             .online      = true,
             .type        = own->device_type,
             .number      = num,
             .queue_level = level,
+            .sub_step    = sub,
         };
         if (peer_registry_upsert(&p) < 0) {
             ESP_LOGE(kTag, "upsert FAILED for %s%u (pass 1)",
@@ -88,11 +92,15 @@ void peer_sim_populate(const app_state_t *own)
                  own->device_type == DEV_TYPE_FR ? "FR" : "T",
                  (unsigned)num);
         uint8_t level = (uint8_t)((esp_random() % 5) + 1);
+        /* Random sub-step -2..+2 so the advisor's sub_step-aware
+         * FULL rejection has variety to exercise. */
+        int8_t  sub   = (int8_t)((int)(esp_random() % 5) - 2);
         peer_t p = {
             .online      = true,
             .type        = own->device_type,
             .number      = num,
             .queue_level = level,
+            .sub_step    = sub,
         };
         if (peer_registry_upsert(&p) < 0) {
             ESP_LOGE(kTag, "retry FAILED for %s%u — registry probably full",
