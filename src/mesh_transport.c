@@ -41,6 +41,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "knob_config.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "peer_registry.h"
@@ -230,30 +231,42 @@ static esp_err_t wifi_mesh_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
 #if FEATURE_CLOUD_FALLBACK
-    /* Register event handlers + apply SSID config + create the
-     * reconnect-backoff timer BEFORE esp_wifi_start so the first
-     * WIFI_EVENT_STA_START actually finds our handler. */
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                               on_wifi_event, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                               on_ip_event, NULL));
-    esp_timer_create_args_t targs = {
-        .callback        = reconnect_timer_cb,
-        .name            = "wifi_reconnect",
-        .dispatch_method = ESP_TIMER_TASK,
-    };
-    ESP_ERROR_CHECK(esp_timer_create(&targs, &s_reconnect_timer));
+    /* Register event handlers + create reconnect-backoff timer
+     * BEFORE esp_wifi_start so the first WIFI_EVENT_STA_START
+     * actually finds our handler. Skipped entirely when the user
+     * has set online_mode=OFF — in that case we don't even
+     * register the events, no STA association attempted. */
+    const knob_config_t *kc = knob_config_get();
+    bool want_sta = kc->online_mode && knob_config_has_wifi();
+    if (want_sta) {
+        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                                   on_wifi_event, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                   on_ip_event, NULL));
+        esp_timer_create_args_t targs = {
+            .callback        = reconnect_timer_cb,
+            .name            = "wifi_reconnect",
+            .dispatch_method = ESP_TIMER_TASK,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&targs, &s_reconnect_timer));
+    } else {
+        ESP_LOGI(kTag, "WiFi STA disabled (online_mode=%s, ssid=%s)",
+                 kc->online_mode ? "ON" : "OFF",
+                 kc->wifi_ssid[0] ? "set" : "empty");
+    }
 #endif
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
 #if FEATURE_CLOUD_FALLBACK
-    wifi_config_t sta_cfg = {0};
-    strncpy((char *)sta_cfg.sta.ssid, APP_MESH_ROUTER_SSID,
-            sizeof(sta_cfg.sta.ssid) - 1);
-    strncpy((char *)sta_cfg.sta.password, APP_MESH_ROUTER_PASS,
-            sizeof(sta_cfg.sta.password) - 1);
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+    if (want_sta) {
+        wifi_config_t sta_cfg = {0};
+        strncpy((char *)sta_cfg.sta.ssid, kc->wifi_ssid,
+                sizeof(sta_cfg.sta.ssid) - 1);
+        strncpy((char *)sta_cfg.sta.password, kc->wifi_pass,
+                sizeof(sta_cfg.sta.password) - 1);
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+    }
 #endif
 
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -290,14 +303,18 @@ static esp_err_t wifi_mesh_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(84));
 
 #if FEATURE_CLOUD_FALLBACK
-    /* The WIFI_EVENT_STA_START handler we registered above triggers
-     * esp_wifi_connect() automatically. Channel will follow the AP
-     * once associated. */
-    ESP_LOGI(kTag, "WiFi STA → connecting to '%s' (channel will follow AP)",
-             APP_MESH_ROUTER_SSID);
+    if (want_sta) {
+        ESP_LOGI(kTag, "WiFi STA → connecting to '%s' (channel will follow AP)",
+                 kc->wifi_ssid);
+    } else {
+        /* online_mode OFF or no creds → pin to our static mesh
+         * channel like the FEATURE_CLOUD_FALLBACK=0 path. */
+        ESP_ERROR_CHECK(esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE));
+        ESP_LOGI(kTag, "WiFi STA idle (offline mesh only) — channel pinned to %u",
+                 s_channel);
+    }
 #else
-    /* No cloud fallback — pin to our static mesh channel. ESP-NOW
-     * only; knob runs purely standalone. */
+    /* Build-time disabled — pin to mesh channel always. */
     ESP_ERROR_CHECK(esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE));
     ESP_LOGI(kTag, "WiFi STA up: channel=%u, no AP association", s_channel);
 #endif

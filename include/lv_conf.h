@@ -58,4 +58,9 @@
  * feature in src/screenshot.c. Pulls in extras/others/snapshot. */
 #define LV_USE_SNAPSHOT 1
 
+/* Enable lv_qrcode_create — used on the PH_PROVISIONING screen to
+ * render the WiFi-join QR so a phone can one-tap onto the knob's
+ * SoftAP. Pulls in extras/libs/qrcode (~5 KB). */
+#define LV_USE_QRCODE 1
+
 #endif /* LV_CONF_H */

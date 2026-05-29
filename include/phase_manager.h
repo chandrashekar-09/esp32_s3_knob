@@ -34,7 +34,12 @@ typedef enum {
     PH_LOC_PICK,
     PH_LOC_NAMING,
     PH_CLEANING_HUB,
-    PH_CLEANING_HUB_FR
+    PH_CLEANING_HUB_FR,
+    /* Entered via 10-second long-press on the screen while in HOME.
+     * Brings up a SoftAP + captive portal; UI shows an Online Mode
+     * toggle on top and a WiFi-join QR below. Exits via captive
+     * portal Save → reboot, or via another long-press (cancel). */
+    PH_PROVISIONING
 } phase_t;
 
 typedef enum {

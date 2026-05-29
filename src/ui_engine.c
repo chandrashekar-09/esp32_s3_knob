@@ -23,7 +23,9 @@
 #include "inactivity_alert.h"
 #include "peer_registry.h"
 #include "device_role.h"
+#include "knob_config.h"
 #include "peer_sim.h"
+#include "provisioning.h"
 #include "screenshot.h"
 
 #if defined(__has_include) && __has_include("lvgl.h")
@@ -376,6 +378,11 @@ static lv_obj_t *s_sleep_root     = NULL;
  * show/hide ops every render. */
 static phase_t s_visible_phase = (phase_t)-1;
 
+/* Provisioning phase root — built lazily on first apply_provisioning,
+ * but referenced by show_only which compiles before that. Forward
+ * declared here so show_only can hide/show it without ordering pain. */
+static lv_obj_t *s_prov_root = NULL;
+
 /* Dotted-background tile — single shared lv_img_dsc_t referenced by
  * every phase root via bg_img_src + bg_img_tiled. Built once in
  * ui_engine_init() before any phase root is constructed. */
@@ -566,6 +573,7 @@ static lv_obj_t *make_phase_root(void)
      * even though the indev was correctly generating the event. */
     lv_obj_add_flag(root, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(root, screen_event_cb, LV_EVENT_PRESSED,      NULL);
+    lv_obj_add_event_cb(root, screen_event_cb, LV_EVENT_PRESSING,     NULL);
     lv_obj_add_event_cb(root, screen_event_cb, LV_EVENT_CLICKED,      NULL);
     lv_obj_add_event_cb(root, screen_event_cb, LV_EVENT_LONG_PRESSED, NULL);
     return root;
@@ -577,13 +585,15 @@ static void show_only(phase_t phase)
     s_visible_phase = phase;
 
     lv_obj_t *to_show =
-        (phase == PH_BOOT)  ? s_boot_root  :
-        (phase == PH_HOME)  ? s_home_root  :
+        (phase == PH_BOOT)         ? s_boot_root  :
+        (phase == PH_HOME)         ? s_home_root  :
         /* PH_ADMIN no longer reachable in this build. */
-        (phase == PH_SLEEP) ? s_sleep_root :
+        (phase == PH_SLEEP)        ? s_sleep_root :
+        (phase == PH_PROVISIONING) ? s_prov_root  :
         s_home_root;  /* fallback */
 
-    lv_obj_t *roots[] = { s_boot_root, s_home_root, s_sleep_root };
+    lv_obj_t *roots[] = { s_boot_root, s_home_root, s_sleep_root,
+                          s_prov_root };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); ++i) {
         if (!roots[i]) continue;
         if (roots[i] == to_show) {
@@ -1263,17 +1273,130 @@ static void build_sleep(void)
 
 static void apply_sleep(const app_state_t *state) { (void)state; }
 
+/* ───────────────────────────── PROVISIONING ─────────────────── */
+
+/* s_prov_root is declared earlier (above show_only) for visibility. */
+static lv_obj_t *s_prov_online_pill = NULL;
+static lv_obj_t *s_prov_online_lbl  = NULL;
+static lv_obj_t *s_prov_qr          = NULL;
+static lv_obj_t *s_prov_ssid_lbl    = NULL;
+static lv_obj_t *s_prov_hint_lbl    = NULL;
+static bool      s_prov_built       = false;
+
+/* Click on the toggle area → flip online_mode + persist + redraw.
+ * Lives on this knob's screen (operator might toggle from the knob
+ * directly without scanning the QR if they just want to switch
+ * modes without changing creds). */
+static void on_online_toggle(lv_event_t *e)
+{
+    (void)e;
+    const knob_config_t *cfg = knob_config_get();
+    knob_config_set_online_mode(!cfg->online_mode);
+    knob_config_commit();
+    /* Force a redraw via consume_dirty/apply on next tick. The
+     * pill label will refresh from knob_config_get() on render. */
+}
+
+static void build_prov_root(void)
+{
+    if (s_prov_built) return;
+    s_prov_built = true;
+
+    s_prov_root = lv_obj_create(s_screen);
+    lv_obj_set_size(s_prov_root, 360, 360);
+    lv_obj_center(s_prov_root);
+    lv_obj_set_style_bg_color(s_prov_root, lv_color_hex(COL_BG), 0);
+    lv_obj_set_style_bg_opa(s_prov_root, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_prov_root, 0, 0);
+    lv_obj_set_style_pad_all(s_prov_root, 0, 0);
+    lv_obj_clear_flag(s_prov_root, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Online-mode pill at the TOP. Touchable — tap toggles state. */
+    s_prov_online_pill = lv_obj_create(s_prov_root);
+    lv_obj_set_size(s_prov_online_pill, 240, 50);
+    lv_obj_align(s_prov_online_pill, LV_ALIGN_TOP_MID, 0, 30);
+    lv_obj_set_style_radius(s_prov_online_pill, 25, 0);
+    lv_obj_set_style_bg_color(s_prov_online_pill, lv_color_hex(0x181818), 0);
+    lv_obj_set_style_bg_opa(s_prov_online_pill, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_prov_online_pill, 2, 0);
+    lv_obj_set_style_pad_all(s_prov_online_pill, 0, 0);
+    lv_obj_clear_flag(s_prov_online_pill, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_prov_online_pill, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_prov_online_pill, on_online_toggle,
+                        LV_EVENT_CLICKED, NULL);
+
+    s_prov_online_lbl = lv_label_create(s_prov_online_pill);
+    lv_obj_set_style_text_font(s_prov_online_lbl, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_align(s_prov_online_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(s_prov_online_lbl);
+
+    /* QR code in the middle. LVGL's lv_qrcode draws into an
+     * internal buffer; we set the data per-render in apply_provisioning. */
+    s_prov_qr = lv_qrcode_create(s_prov_root, 180,
+                                  lv_color_hex(0xFFFFFF),
+                                  lv_color_hex(0x000000));
+    lv_obj_align(s_prov_qr, LV_ALIGN_CENTER, 0, 10);
+    lv_obj_set_style_border_color(s_prov_qr, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_border_width(s_prov_qr, 4, 0);
+
+    s_prov_ssid_lbl = lv_label_create(s_prov_root);
+    lv_obj_set_style_text_font(s_prov_ssid_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_prov_ssid_lbl, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_align(s_prov_ssid_lbl, LV_ALIGN_BOTTOM_MID, 0, -38);
+
+    s_prov_hint_lbl = lv_label_create(s_prov_root);
+    lv_obj_set_style_text_font(s_prov_hint_lbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_prov_hint_lbl, lv_color_hex(0x666666), 0);
+    lv_obj_align(s_prov_hint_lbl, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_label_set_text(s_prov_hint_lbl, "Scan QR · open captive portal");
+}
+
+static void apply_provisioning(const app_state_t *state)
+{
+    (void)state;
+    build_prov_root();
+    lv_obj_clear_flag(s_prov_root, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_prov_root);
+
+    /* Online-mode pill text + colour reflects current NVS value. */
+    const knob_config_t *cfg = knob_config_get();
+    bool on = cfg->online_mode;
+    lv_label_set_text(s_prov_online_lbl,
+                       on ? "Online Mode: ON" : "Online Mode: OFF");
+    lv_obj_set_style_text_color(s_prov_online_lbl,
+        lv_color_hex(on ? 0x22C55E : 0x888888), 0);
+    lv_obj_set_style_border_color(s_prov_online_pill,
+        lv_color_hex(on ? 0x22C55E : 0x444444), 0);
+
+    /* QR — update only when SSID/data actually changes (lv_qrcode
+     * re-encode is ~20 ms; cheap to do every frame but pointless). */
+    const char *qr = provisioning_qr_string();
+    if (qr && qr[0]) {
+        static char last_qr[64] = {0};
+        if (strcmp(last_qr, qr) != 0) {
+            lv_qrcode_update(s_prov_qr, qr, strlen(qr));
+            strncpy(last_qr, qr, sizeof(last_qr) - 1);
+        }
+    }
+
+    const char *ssid = provisioning_softap_ssid();
+    if (ssid && ssid[0]) {
+        lv_label_set_text(s_prov_ssid_lbl, ssid);
+    }
+}
+
 /* ───────────────────────────── render ────────────────────────────────── */
 
 static void apply_state(const app_state_t *state)
 {
     show_only(state->phase);
     switch (state->phase) {
-    case PH_BOOT:  apply_boot(state);  break;
-    case PH_HOME:  apply_home(state);  break;
+    case PH_BOOT:         apply_boot(state);          break;
+    case PH_HOME:         apply_home(state);          break;
     /* PH_ADMIN removed in this build. */
-    case PH_SLEEP: apply_sleep(state); break;
-    default:       apply_home(state);  break;  /* unhandled phase → home */
+    case PH_SLEEP:        apply_sleep(state);         break;
+    case PH_PROVISIONING: apply_provisioning(state);  break;
+    default:              apply_home(state);          break;
     }
 }
 
@@ -1292,9 +1415,46 @@ static void apply_state(const app_state_t *state)
 static void screen_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
+    /* 10-second long-press → enter PH_PROVISIONING. Tracked across
+     * PRESSED → PRESSING → RELEASED so we can fire the moment the
+     * 10 s threshold passes (no need to wait for release). The
+     * 1.5 s LONG_PRESSED event still fires for FR↔T toggle, but
+     * the user who keeps holding past 10 s lands in provisioning
+     * regardless. */
+    static uint32_t s_press_start_ms = 0;
+    static bool     s_prov_triggered = false;
+
     if (code == LV_EVENT_PRESSED) {
+        s_press_start_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        s_prov_triggered = false;
         if (phase_manager_dismiss_alert_if_active()) {
             ESP_LOGI(TAG, "screen PRESS → alert dismissed (instant)");
+        }
+    } else if (code == LV_EVENT_PRESSING) {
+        if (s_prov_triggered) return;
+        uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        if ((now - s_press_start_ms) >= 10000U) {
+            s_prov_triggered = true;
+            phase_t cur = phase_manager_get_phase();
+            if (cur == PH_PROVISIONING) {
+                /* Already in provisioning → exit back to HOME without
+                 * rebooting. Tears down the SoftAP + HTTP server.
+                 * Note: if the operator toggled online_mode on the
+                 * pill, the change is already in NVS — but the WiFi
+                 * STA / cloud bringup decision was made at boot, so
+                 * the change won't TAKE EFFECT until the next power
+                 * cycle. The pill colour reflects what's saved. */
+                ESP_LOGI(TAG, "screen 10s LONG (in PROV) → back to HOME");
+                provisioning_stop();
+                phase_manager_set_phase(PH_HOME);
+            } else {
+                ESP_LOGI(TAG, "screen 10s LONG → enter PROVISIONING");
+                if (provisioning_start() == ESP_OK) {
+                    phase_manager_set_phase(PH_PROVISIONING);
+                } else {
+                    ESP_LOGE(TAG, "provisioning_start failed");
+                }
+            }
         }
     } else if (code == LV_EVENT_CLICKED) {
         /* Triple-tap → screenshot. Window is 600 ms between

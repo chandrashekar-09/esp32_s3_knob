@@ -21,6 +21,8 @@ idf_component_register(SRCS "main.c"
                             "mesh_service.c"
                             "cloud_transport.c"
                             "cloud_subscribe.c"
+                            "knob_config.c"
+                            "provisioning.c"
                        INCLUDE_DIRS "../include"
                        PRIV_REQUIRES driver esp_driver_gpio esp_driver_i2c
                                      esp_driver_spi esp_driver_pcnt
@@ -41,6 +43,9 @@ idf_component_register(SRCS "main.c"
                                      # by mesh_transport.c for broadcast).
                                      esp_wifi esp_event esp_netif
                                      esp_http_client esp_https_ota
+                                     # esp_http_server hosts the captive
+                                     # portal during PH_PROVISIONING.
+                                     esp_http_server
                                      app_update mbedtls
                                      # cJSON for parsing Supabase poll
                                      # responses in cloud_subscribe.c.

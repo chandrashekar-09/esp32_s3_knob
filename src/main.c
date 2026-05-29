@@ -18,6 +18,7 @@
 #include "app_mutex.h"
 #include "inactivity_alert.h"
 #include "input_encoder.h"
+#include "knob_config.h"
 #include "lvgl_port.h"
 #include "mesh_service.h"
 #include "ota_service.h"
@@ -137,6 +138,10 @@ void app_main(void)
     }
 
     app_mutex_init();
+    /* Load NVS-backed knob config FIRST so every later subsystem
+     * (mesh_transport, mesh_service, cloud) reads the same view of
+     * online_mode + WiFi creds. */
+    knob_config_init();
     phase_manager_init();
     input_init();
     /* Pre-init the I2S beep + MUTE GPIO so failures are logged at

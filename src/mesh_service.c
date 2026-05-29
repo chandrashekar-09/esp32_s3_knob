@@ -41,6 +41,7 @@
 #include "cloud_config.h"
 #include "cloud_subscribe.h"
 #include "cloud_transport.h"
+#include "knob_config.h"
 #endif
 
 #define MESH_NVS_NAMESPACE  "mesh"
@@ -179,19 +180,17 @@ static void broadcaster_task(void *arg)
             }
 
 #if FEATURE_CLOUD_FALLBACK
-            /* Cloud path (secondary). UPSERT to Supabase on every
-             * level commit AND on a heartbeat cadence so the
-             * dashboard's "last_seen" stays fresh. HTTPS is much
-             * more expensive than ESP-NOW (~200-500 ms per round
-             * trip), so we DON'T do a per-tick upsert — heartbeat
-             * is plenty for a "is this knob alive" indicator. */
-            static uint32_t last_cloud_post_ms = 0;
-            bool heartbeat_due =
-                (now_ms - last_cloud_post_ms) >= CLOUD_HEARTBEAT_MS;
-            if ((level_committed || heartbeat_due) &&
-                cloud_transport_is_ready()) {
-                if (cloud_transport_upsert(&st) == ESP_OK) {
-                    last_cloud_post_ms = now_ms;
+            /* Cloud path (secondary). Skip entirely if the user
+             * has online_mode=OFF or no WiFi creds saved. */
+            if (knob_config_get()->online_mode) {
+                static uint32_t last_cloud_post_ms = 0;
+                bool heartbeat_due =
+                    (now_ms - last_cloud_post_ms) >= CLOUD_HEARTBEAT_MS;
+                if ((level_committed || heartbeat_due) &&
+                    cloud_transport_is_ready()) {
+                    if (cloud_transport_upsert(&st) == ESP_OK) {
+                        last_cloud_post_ms = now_ms;
+                    }
                 }
             }
 #endif
@@ -228,13 +227,18 @@ esp_err_t mesh_service_start(void)
     }
 
 #if FEATURE_CLOUD_FALLBACK
-    /* Initialise the cloud uplink (POST upsert) and downlink (poll
-     * SUBSCRIBE). Both modules wait for WiFi internally so they can
-     * be started before WiFi is up — the broadcaster will start
-     * firing cloud upserts and the subscribe task will start
-     * dispatching peer rows the moment WiFi associates. */
-    cloud_transport_init();
-    cloud_subscribe_start();
+    /* Cloud uplink + downlink only run when the user has online
+     * mode enabled AND configured WiFi credentials. With online
+     * mode OFF the knob is pure ESP-NOW — saves power, never
+     * touches the internet, no cloud bills. */
+    if (knob_config_get()->online_mode && knob_config_has_wifi()) {
+        cloud_transport_init();
+        cloud_subscribe_start();
+    } else {
+        ESP_LOGI(kTag, "cloud disabled (online_mode=%s, ssid=%s)",
+                 knob_config_get()->online_mode ? "ON" : "OFF",
+                 knob_config_has_wifi() ? "set" : "empty");
+    }
 #endif
 
     /* If NVS has a persisted number, use it immediately so the
