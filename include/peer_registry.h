@@ -22,17 +22,22 @@ extern "C" {
 typedef struct {
     bool          online;
     device_type_t type;
-    uint8_t       number;          /* 1..16 */
+    /* MAC = stable identity. Slot lookup keys by MAC so a peer that
+     * changes its `number` (rank rebalance) updates IN PLACE rather
+     * than creating an orphan slot at the old number. Set once on
+     * first upsert and preserved across number changes. Own's MAC
+     * is set via peer_registry_set_own_mac() at mesh boot. */
+    uint8_t       mac[6];
+    uint8_t       number;          /* 1..16 — DERIVED rank, not stable id */
     uint8_t       queue_level;     /* 1..5  */
     /* Sub-step within current level: -(STEP-1)..+(STEP-1), STEP=3
      * so range -2..+2. +2 means "one encoder detent from advancing
      * to the next level"; -2 means "one detent from retreating".
      * Advisor uses this to reject FULL peers that are sub_step=+2
      * (about to commit to QUE) as receivers, so LONG-QUE senders
-     * aren't redirected to a place that's about to be overloaded.
-     * Stale-by-broadcast: only updated on level commit until the
-     * mesh broadcast protocol carries sub_step too. */
+     * aren't redirected to a place that's about to be overloaded. */
     int8_t        sub_step;
+    uint32_t      last_seen_ms;    /* most recent broadcast receipt */
     uint8_t       prev_level;      /* previous distinct level (trend) */
     uint32_t      prev_level_ms;   /* when prev_level became prev    */
     uint32_t      curr_level_ms;   /* when curr level became current */
@@ -49,10 +54,52 @@ void peer_registry_init(void);
  * toggles and queue-level rotations without explicit notify. */
 void peer_registry_sync_own(const app_state_t *st);
 
-/* Insert or update a peer by (type, number) key. Returns slot
- * index used, or -1 if registry is full. To be wired into the
- * mesh layer when it lands. */
+/* Insert or update a peer KEYED BY MAC. If a slot with this MAC
+ * already exists, all fields are updated in place (including a
+ * possibly-changed `number` from a rank rebalance). If not, the
+ * next free slot is used. Returns slot index, or -1 if full.
+ *
+ * Caller MUST set p->mac before calling. last_seen_ms is stamped
+ * automatically with esp_timer-derived now_ms. */
 int peer_registry_upsert(const peer_t *p);
+
+/* Set the own device's MAC. Called once at boot by mesh_service
+ * before sync_own runs. Used by sync_own to attach our MAC to
+ * slot 0, and by compute_rank() to find our position in the
+ * MAC-sorted same-type list. */
+void peer_registry_set_own_mac(const uint8_t mac[6]);
+
+/* Mark online peers as offline if their last_seen_ms is older
+ * than timeout_ms. Slot 0 (own) is never aged out. Returns
+ * number of peers transitioned to offline this sweep. */
+uint8_t peer_registry_age_out(uint32_t now_ms, uint32_t timeout_ms);
+
+/* True iff the peer hasn't broadcast for stale_ms — used by the
+ * UI to render at reduced opacity during the "fading" grace
+ * window before age_out drops the peer entirely. Own (slot 0) is
+ * never considered stale because sync_own freshens it every render. */
+bool peer_is_stale(const peer_t *p, uint32_t now_ms, uint32_t stale_ms);
+
+/* Compute a STABLE rank for this knob: new joiners get the highest
+ * unused number (preserves existing knobs' identities); existing
+ * knobs only renumber DOWN when a peer with a lower number drops
+ * out (gap-fill from above). MAC is used only as a tiebreaker
+ * when two knobs simultaneously hold equal numbers (e.g. two new
+ * knobs colliding during their first broadcast cycle).
+ *
+ * Algorithm: sort all online same-type knobs (including self) by
+ * (current_number, MAC); knobs with current_number == 0 (just
+ * booted, not yet assigned) sort to the END so they don't displace
+ * established ranks. Self's new number = its position in the
+ * sorted list + 1.
+ *
+ *   current_number: this knob's last broadcast number, or 0 if
+ *                    it hasn't picked one yet (fresh boot).
+ *
+ * Returns 1..16. Own MAC must be set via peer_registry_set_own_mac()
+ * before this works correctly. */
+uint8_t peer_registry_compute_rank(device_type_t type,
+                                   uint8_t current_number);
 
 /* Mark a peer offline (e.g. mesh saw it leave). The slot remains
  * allocated so re-joining doesn't churn indices. */

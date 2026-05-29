@@ -19,6 +19,7 @@
 #include "inactivity_alert.h"
 #include "input_encoder.h"
 #include "lvgl_port.h"
+#include "mesh_service.h"
 #include "ota_service.h"
 #include "phase_manager.h"
 #include "sd_card.h"
@@ -151,16 +152,29 @@ void app_main(void)
     /* UI owns Core 1 — render loop + LVGL + encoder polling. */
     xTaskCreatePinnedToCore(ui_task, "ui_task", 6144, NULL, 4, NULL, 1);
 
-    /* WiFi + OTA on Core 0. Brought up AFTER the UI task is created so
-     * the first paint (BOOT screen) lands before the WiFi driver starts
-     * eating cycles. wifi_manager_init() returns once the driver is
-     * started; the IP-acquired callback flips wifi_manager_is_connected()
-     * which the OTA poller awaits. Failures here don't kill the UI. */
+    /* Networking stack on Core 0. Brought up AFTER the UI task is
+     * created so the first paint (BOOT screen) lands before WiFi
+     * eats cycles. Two mutually-exclusive modes per FEATURE_ZERO_
+     * CONFIG_MESH:
+     *
+     *   ON  → mesh_service_start(): WiFi STA without AP + LR PHY,
+     *         ESP-NOW broadcast peer, auto-slot-claim, 1 Hz state
+     *         broadcaster. Fully offline; no internet needed.
+     *
+     *   OFF → wifi_manager_init() + ota_service_start(): connects
+     *         to APP_MESH_ROUTER_SSID, polls HTTPS OTA endpoint
+     *         every minute. Lab/dev mode. */
+#if FEATURE_ZERO_CONFIG_MESH
+    if (mesh_service_start() != ESP_OK) {
+        ESP_LOGW(TAG_MAIN, "mesh service start failed — running solo");
+    }
+#else
     if (wifi_manager_init() == ESP_OK) {
         ota_service_start();
     } else {
         ESP_LOGW(TAG_MAIN, "wifi init failed — OTA polling disabled");
     }
+#endif
 
     ESP_LOGI(TAG_MAIN, "ui firmware started");
 }

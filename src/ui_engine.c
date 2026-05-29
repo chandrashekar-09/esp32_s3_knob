@@ -22,6 +22,7 @@
 #include "esp_timer.h"
 #include "inactivity_alert.h"
 #include "peer_registry.h"
+#include "device_role.h"
 #include "peer_sim.h"
 #include "screenshot.h"
 
@@ -485,7 +486,7 @@ static void screen_event_cb(lv_event_t *e);  /* fwd decl */
 static void update_peer_wedge(int peer_idx, const ring_slot_geom_t *geom,
                               const wedge_angle_t *angle,
                               uint32_t color, uint32_t track_color,
-                              int target_value)
+                              int target_value, bool stale)
 {
     if (peer_idx < 0 || peer_idx >= MAX_PEERS_IN_VIEW) return;
     lv_obj_t *a = s_wedge_pool[peer_idx];
@@ -499,6 +500,13 @@ static void update_peer_wedge(int peer_idx, const ring_slot_geom_t *geom,
     lv_obj_set_style_arc_width(a, geom->stroke, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(a, lv_color_hex(track_color), LV_PART_MAIN);
     lv_obj_set_style_arc_color(a, lv_color_hex(color),       LV_PART_INDICATOR);
+    /* Stale peers (no broadcast in MESH_PEER_STALE_MS) fade to 50%
+     * opacity so the user can see the connection is degrading
+     * without the peer disappearing yet. Full opacity returns
+     * automatically on the next received frame. */
+    lv_opa_t op = stale ? LV_OPA_50 : LV_OPA_COVER;
+    lv_obj_set_style_arc_opa(a, op, LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(a, op, LV_PART_INDICATOR);
     lv_obj_clear_flag(a, LV_OBJ_FLAG_HIDDEN);
 
     if (s_wedge_prev_target[peer_idx] != target_value) {
@@ -856,21 +864,22 @@ static void apply_home(const app_state_t *state)
     if (level < 1) level = 1; else if (level > 5) level = 5;
     uint32_t color = color_for_level(level);
 
-#if APP_PEER_SIM
     /* Type-toggle re-seed: when the encoder long-press flips
      * device_type (FR↔T), the old-type peers in the registry would
      * naturally drop out of the type-filtered iteration below — but
-     * in testing mode that leaves the ring lonely (just own, no
+     * in sim mode that leaves the ring lonely (just own, no
      * simulated peers of the new type). Re-seed the registry with
-     * fresh random peers of the NEW type so the multi-ring layout
-     * stays demoable in both modes. Real-mesh builds (APP_PEER_SIM=0)
-     * skip this; peer_registry there reflects live network state. */
-    static device_type_t prev_type = (device_type_t)-1;
-    if (prev_type != (device_type_t)-1 && prev_type != state->device_type) {
-        peer_sim_populate(state);
+     * fresh random peers of the NEW type. Runtime-gated by either
+     * the APP_PEER_SIM compile flag OR per-device MAC enrolment in
+     * device_role.c, so a single physical knob can stay in demo
+     * mode even when the rest of the fleet OTAs to APP_PEER_SIM=0. */
+    if (APP_PEER_SIM || device_role_is_demo()) {
+        static device_type_t prev_type = (device_type_t)-1;
+        if (prev_type != (device_type_t)-1 && prev_type != state->device_type) {
+            peer_sim_populate(state);
+        }
+        prev_type = state->device_type;
     }
-    prev_type = state->device_type;
-#endif
 
     /* ── peer registry sync + tier resolution ────────────────────────
      * Mirror the own device's current identity/level into the
@@ -990,7 +999,16 @@ static void apply_home(const app_state_t *state)
             else if (pprog > PROG_MAX) pprog = PROG_MAX;
             p_target = pprog * 100 / PROG_MAX;
         }
-        update_peer_wedge(peer_count, gm, an, pa, COL_TRACK, p_target);
+        /* Peer freshness: own (slot 0) is always fresh because
+         * sync_own runs every render. Other peers go "stale" when
+         * we haven't received their broadcast for MESH_PEER_STALE_MS
+         * — UI fades them to 50 % opacity so the user sees the
+         * connection wobbling without the peer disappearing. Frame
+         * recovers automatically when the next broadcast arrives. */
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        bool stale = !is_own && peer_is_stale(p, now_ms, 3000U);
+
+        update_peer_wedge(peer_count, gm, an, pa, COL_TRACK, p_target, stale);
 
         /* Peer number label — show for EVERY peer including own.
          * Carrying the own number on its wedge means the identity
@@ -999,7 +1017,8 @@ static void apply_home(const app_state_t *state)
          * shrunk. Colour flips based on the peer's fill level:
          * low levels (1..2) → primary neon (legible against the
          * unfilled dark wedge area); high levels (3..5) → COL_BG
-         * black (legible against the bright filled wedge area). */
+         * black (legible against the bright filled wedge area).
+         * Stale peers' label also fades to 50% opacity. */
         lv_obj_t *num = s_peer_num[peer_count];
         {
             int mid_r     = (gm->outer_r + gm->inner_r) / 2;
@@ -1013,6 +1032,7 @@ static void apply_home(const app_state_t *state)
 
             uint32_t text_col = (p->queue_level >= 3) ? COL_BG : pa;
             lv_obj_set_style_text_color(num, lv_color_hex(text_col), 0);
+            lv_obj_set_style_text_opa(num, stale ? LV_OPA_50 : LV_OPA_COVER, 0);
 
             /* Centre the label on (sx, sy) by aligning to
              * screen-relative offset from the home root's centre. */
@@ -1330,20 +1350,18 @@ void ui_engine_init(void)
      * will populate slots 1..31 via peer_registry_upsert(). */
     peer_registry_init();
 
-    /* TESTING MODE — when APP_PEER_SIM is 1, populate the registry
-     * with random same-type peers so the multi-ring layouts can be
-     * visualised without a real mesh. Seeds AFTER an explicit
-     * sync_own so slot 0 holds the own device first; the simulator
-     * fills slots 1..31 around it. Flip APP_PEER_SIM to 0 to
-     * disable. */
-#if APP_PEER_SIM
-    {
+    /* TESTING / DEMO MODE — populate the registry with random same-
+     * type peers so the multi-ring layouts can be visualised without
+     * a real mesh. Gated by (APP_PEER_SIM || device_role_is_demo()) —
+     * the MAC-enrolment path keeps designated "demo unit" knobs in
+     * sim mode permanently, surviving any OTA that flips the compile
+     * flag to 0 for the rest of the fleet. */
+    if (APP_PEER_SIM || device_role_is_demo()) {
         app_state_t boot_state;
         phase_manager_get_state(&boot_state);
         peer_registry_sync_own(&boot_state);
         peer_sim_populate(&boot_state);
     }
-#endif
 
     /* Build the shared dot-matrix tile BEFORE any phase root references it. */
     build_dot_tile();

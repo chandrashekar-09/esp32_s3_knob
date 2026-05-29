@@ -63,6 +63,17 @@ void peer_sim_populate(const app_state_t *own)
             .queue_level = level,
             .sub_step    = sub,
         };
+        /* Synthesize a stable fake MAC from (type, num) so the
+         * registry's MAC-keyed upsert works. Prefix 0xFE so it
+         * can't collide with a real STA MAC (which has bit 0 of
+         * byte 0 clear). Type in byte 4, number in byte 5 ensures
+         * uniqueness across sim peers within this fleet. */
+        p.mac[0] = 0xFE;
+        p.mac[1] = 0xFE;
+        p.mac[2] = 0x00;
+        p.mac[3] = 0x00;
+        p.mac[4] = (uint8_t)own->device_type;
+        p.mac[5] = num;
         if (peer_registry_upsert(&p) < 0) {
             ESP_LOGE(kTag, "upsert FAILED for %s%u (pass 1)",
                      own->device_type == DEV_TYPE_FR ? "FR" : "T",
@@ -102,6 +113,12 @@ void peer_sim_populate(const app_state_t *own)
             .queue_level = level,
             .sub_step    = sub,
         };
+        /* Same fake-MAC scheme as pass 1 so retry hits the existing
+         * slot in place. */
+        p.mac[0] = 0xFE;
+        p.mac[1] = 0xFE;
+        p.mac[4] = (uint8_t)own->device_type;
+        p.mac[5] = num;
         if (peer_registry_upsert(&p) < 0) {
             ESP_LOGE(kTag, "retry FAILED for %s%u — registry probably full",
                      own->device_type == DEV_TYPE_FR ? "FR" : "T",

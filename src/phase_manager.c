@@ -104,12 +104,17 @@ static void phase_enter(phase_t phase, uint32_t now)
     s_last_input_ms = now;
 }
 
-/* Called after ANY input source mutates queue_level (encoder, future
- * AI, master command, pre-open wake). Syncs the registry with the
- * new own-level, recomputes the redirect advisor, and parks the
- * advice on app_state so the UI reads from one place. Mirrors the
- * "application path" enumerated in [[project-sorting-architecture]]. */
-static void after_level_change(void)
+/* Recompute the redirect advisor against the current registry
+ * snapshot and refresh the cached app_state.alert_* fields. Called
+ * from two paths:
+ *   - after_level_change() — own's queue_level just changed
+ *   - espnow_inbound_peer_full() — a peer's state just changed
+ *
+ * The second path is what makes the SEND>X line update LIVE when
+ * a remote knob's status moves. Without it, the cached advisor
+ * result would only refresh on local input, leaving the UI stuck
+ * on stale advice from the last own-side action. */
+void phase_manager_recompute_advisor(void)
 {
     peer_registry_sync_own(&s_state);
     advisor_advice_t adv;
@@ -119,6 +124,15 @@ static void after_level_change(void)
     s_state.alert_target_level = adv.target_level;
     s_state.alert_urgent       = adv.urgent;
     s_state.alert_trend_down   = adv.trend_down;
+}
+
+/* Called after ANY input source mutates queue_level (encoder, future
+ * AI, master command, pre-open wake). Same recompute as the public
+ * function above — kept as a separate symbol so static helpers can
+ * use it without depending on the public API surface. */
+static void after_level_change(void)
+{
+    phase_manager_recompute_advisor();
 }
 
 void phase_manager_init(void)
@@ -179,6 +193,12 @@ int phase_manager_get_step_index(phase_t phase)
 {
     (void)phase;
     return 7;  /* always "HOME" step in this simplified build */
+}
+
+void phase_manager_set_device_number(uint8_t n)
+{
+    if (n < 1 || n > 16) return;
+    s_state.device_number = n;
 }
 
 void phase_manager_reset_queue(void)

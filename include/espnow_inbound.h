@@ -21,7 +21,19 @@ extern "C" {
 
 /* Peer broadcast → registry upsert. Called once per ~1 Hz frame
  * from any same-type or cross-type peer. The advisor sees the
- * updated registry on the next render tick. */
+ * updated registry on the next render tick.
+ *
+ * `mac` is the peer's STA MAC (origin_mac of the mesh frame) and
+ * acts as the registry's primary key — required so a peer that
+ * changes its `number` (rank rebalance after a join/leave) updates
+ * its existing slot in place rather than orphaning the old number. */
+void espnow_inbound_peer_full(device_type_t type, uint8_t number,
+                              uint8_t queue_level, int8_t sub_step,
+                              const uint8_t mac[6]);
+
+/* Legacy 3-arg + 4-arg shims kept for any caller that doesn't
+ * have a MAC yet (e.g. local-only stubs). These no-op safely if
+ * MAC is unavailable since the registry now requires MAC. */
 void espnow_inbound_peer(device_type_t type, uint8_t number,
                          uint8_t queue_level);
 

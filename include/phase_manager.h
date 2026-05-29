@@ -154,6 +154,21 @@ void phase_manager_set_queue_level(uint8_t level);
  * after alert, first tap, etc. Idempotent. */
 bool phase_manager_dismiss_alert_if_active(void);
 
+/* Update the device's mesh slot at runtime — used by the auto-slot-
+ * claim flow at boot. n must be in 1..16. Live change: peer
+ * broadcasts on the next render pick up the new identity. */
+void phase_manager_set_device_number(uint8_t n);
+
+/* Re-run the redirect advisor against the current registry snapshot
+ * and refresh app_state.alert_* fields. Called by:
+ *   - after_level_change() on own's queue_level change
+ *   - espnow_inbound on every peer broadcast received
+ *
+ * Without this hook, a peer's queue change wouldn't trigger a fresh
+ * SEND>X evaluation on this knob until our own state changed — i.e.
+ * the displayed advice could be stale for as long as we sat idle. */
+void phase_manager_recompute_advisor(void);
+
 #ifdef __cplusplus
 }
 #endif

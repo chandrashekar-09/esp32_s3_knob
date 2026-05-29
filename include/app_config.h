@@ -65,8 +65,12 @@
  *       returns inactive until real mesh data populates the
  *       registry via espnow_inbound_peer().
  *
- * Flip to 0 when ready for the real mesh integration. */
-#define APP_PEER_SIM        1
+ * Flip to 0 once ready for the real mesh integration. Note that
+ * device_role.c provides a MAC-based override — knobs listed in
+ * kDemoMacs (currently the COM13 demo unit) stay in sim mode even
+ * with this flag at 0, so production knobs use real-mesh data
+ * while the demo unit keeps showing rich layouts. */
+#define APP_PEER_SIM        0
 
 #define APP_DISPLAY_WIDTH 360
 #define APP_DISPLAY_HEIGHT 360
@@ -74,7 +78,7 @@
  * `TFT_SPI_FREQ_HZ` exactly. The panel module is qualified at this rate. */
 #define APP_DISPLAY_PCLK_HZ (50 * 1000 * 1000)
 
-//#define APP_MESH_ROUTER_SSID "IIIT-Guest"
+//#define APP_MESH_ROUTER_SSID "II
 //#define APP_MESH_ROUTER_PASS "f6s68VHJ89mC"
 
 #define APP_MESH_ROUTER_SSID "TEAMPLAYER 9060"
@@ -102,5 +106,27 @@
 
 #define APP_SKIP_NET_UI 1
 #define APP_SKIP_TIME_UI 1
+
+/* FEATURE_ZERO_CONFIG_MESH — when set, replaces wifi_manager_init +
+ * ota_service_start with mesh_service_start. The knob:
+ *   - brings up WiFi STA (no AP association) + LR PHY
+ *   - opens ESP-NOW on a fixed channel (NVS-configurable, default
+ *     MESH_DEFAULT_CHANNEL = 6)
+ *   - listens 4 s, auto-claims a slot (NVS-sticky)
+ *   - broadcasts its state at ~1 Hz
+ *   - never touches the internet (no router needed)
+ *
+ * Set to 0 for lab builds that need the existing HTTPS-OTA path
+ * (knob connects to APP_MESH_ROUTER_SSID and polls for updates).
+ * Mesh and lab modes are mutually exclusive — only one owns WiFi. */
+#define FEATURE_ZERO_CONFIG_MESH 1
+
+/* FEATURE_CLOUD_FALLBACK — when set, mesh_transport ALSO brings up
+ * WiFi STA (connecting to APP_MESH_ROUTER_SSID) so the cloud_transport
+ * module can POST/SUBSCRIBE to Supabase. ESP-NOW continues operating
+ * on whichever channel WiFi STA ends up on (radio is shared).
+ * Disable on knobs that should be ESP-NOW-only (no internet routes,
+ * pure offline). */
+#define FEATURE_CLOUD_FALLBACK 1
 
 #endif /* APP_CONFIG_H */

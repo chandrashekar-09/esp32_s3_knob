@@ -12,6 +12,8 @@
 
 #include "espnow_inbound.h"
 
+#include <string.h>
+
 #include "advisor.h"
 #include "esp_log.h"
 #include "peer_registry.h"
@@ -19,26 +21,43 @@
 
 static const char *kTag = "espnow_in";
 
-void espnow_inbound_peer(device_type_t type, uint8_t number,
-                         uint8_t queue_level)
+void espnow_inbound_peer_full(device_type_t type, uint8_t number,
+                              uint8_t queue_level, int8_t sub_step,
+                              const uint8_t mac[6])
 {
+    if (!mac) return;
     if (number < 1 || number > 16) return;
     if (queue_level < 1 || queue_level > 5) return;
+    if (sub_step < -2 || sub_step > 2) sub_step = 0;
     peer_t p = {
         .online      = true,
         .type        = type,
         .number      = number,
         .queue_level = queue_level,
-        /* trend fields ignored by upsert — registry maintains them */
+        .sub_step    = sub_step,
+        /* trend fields + last_seen_ms maintained by upsert */
     };
+    memcpy(p.mac, mac, 6);
     peer_registry_upsert(&p);
-    /* Advisor pickup happens on the next ui_engine render tick
-     * (apply_home calls peer_registry_sync_own + recompute path).
-     * No explicit notify needed — the render cadence is fast
-     * enough that a peer broadcast lands visibly within ~100 ms. */
-    ESP_LOGD(kTag, "peer %s%u level=%u",
+    /* Trigger an advisor re-evaluation here, not just on the next
+     * own-side level change. Without this, a peer's queue movement
+     * (e.g. peer FR2 → LONG QUE) would reach our registry but the
+     * SEND>X advice cached on app_state would stay frozen at the
+     * value computed during our last local input. */
+    phase_manager_recompute_advisor();
+    ESP_LOGI(kTag, "peer %s%u level=%u sub=%d mac=%02x:%02x:%02x:%02x:%02x:%02x",
              type == DEV_TYPE_FR ? "FR" : "T",
-             (unsigned)number, (unsigned)queue_level);
+             (unsigned)number, (unsigned)queue_level, (int)sub_step,
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+/* Legacy entry — no MAC available, no-op (upsert requires MAC now).
+ * Kept so any local stub callers don't break the build. */
+void espnow_inbound_peer(device_type_t type, uint8_t number,
+                         uint8_t queue_level)
+{
+    (void)type; (void)number; (void)queue_level;
+    ESP_LOGW(kTag, "legacy espnow_inbound_peer ignored — MAC required");
 }
 
 void espnow_inbound_master_cmd(device_type_t target_type,
